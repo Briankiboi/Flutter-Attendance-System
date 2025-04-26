@@ -1,0 +1,34 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // User authentication check
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Role-based checks
+    function isLecturer() {
+      return isAuthenticated() && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'lecturer';
+    }
+    
+    // Users collection
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isLecturer());
+      allow write: if isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    // Attendance collection
+    match /attendance/{attendanceId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && exists(/databases/$(database)/documents/sessions/$(request.resource.data.sessionId));
+      allow update: if isLecturer();
+    }
+    
+    // Sessions collection
+    match /sessions/{sessionId} {
+      allow read: if isAuthenticated();
+      allow write: if isLecturer();
+    }
+  }
+} 

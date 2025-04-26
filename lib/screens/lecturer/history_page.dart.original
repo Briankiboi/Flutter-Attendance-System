@@ -1,0 +1,3570 @@
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
+import 'package:flutter/services.dart';
+import 'dart:typed_data';
+import 'package:intl/intl.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+import 'package:flutter/rendering.dart';
+import 'dart:ui' as ui;
+import 'package:fl_chart/fl_chart.dart';
+import 'analyze_attendance.dart';
+import 'analysis.dart';
+
+// PrintAttendancePage for displaying and printing formatted attendance
+class PrintAttendancePage extends StatefulWidget {
+  final Map<String, dynamic> sessionData;
+  final List<Map<String, dynamic>>? relatedSessions;
+
+  PrintAttendancePage({
+    Key? key, 
+    required this.sessionData, 
+    this.relatedSessions
+  }) : super(key: key);
+
+  @override
+  _PrintAttendancePageState createState() => _PrintAttendancePageState();
+}
+
+class _PrintAttendancePageState extends State<PrintAttendancePage> {
+  final GlobalKey _printKey = GlobalKey();
+  bool _isLoading = false;
+  int _selectedSessionIndex = 0;
+  bool _combinedPrintMode = false;
+
+  @override
+  Widget build(BuildContext context) {
+    // Use either selected session or primary session data
+    Map<String, dynamic> currentSession = widget.sessionData;
+    List<Map<String, dynamic>> allSessions = [];
+    
+    // Ensure course information exists and is properly extracted
+    if (currentSession.containsKey('attendees') && 
+        currentSession['attendees'] is List && 
+        currentSession['attendees'].isNotEmpty) {
+      // Try to get department from the first attendee
+      final firstAttendee = currentSession['attendees'][0];
+      if (firstAttendee is Map) {
+        if ((currentSession['department'] == null || currentSession['department'].isEmpty) && 
+            firstAttendee.containsKey('department')) {
+          currentSession['department'] = firstAttendee['department'];
+        }
+        if ((currentSession['course'] == null || currentSession['course'].isEmpty) && 
+            firstAttendee.containsKey('course')) {
+          currentSession['course'] = firstAttendee['course'];
+        }
+        if ((currentSession['year'] == null || currentSession['year'].toString().isEmpty) && 
+            firstAttendee.containsKey('year')) {
+          currentSession['year'] = firstAttendee['year'];
+        }
+        if ((currentSession['semester'] == null || currentSession['semester'].toString().isEmpty) && 
+            firstAttendee.containsKey('semester')) {
+          currentSession['semester'] = firstAttendee['semester'];
+        }
+      }
+    }
+    
+    // If there are related sessions, use them for navigation
+    if (widget.relatedSessions != null && widget.relatedSessions!.isNotEmpty) {
+      allSessions = List.from(widget.relatedSessions!);
+      
+      // Sort sessions chronologically (oldest to newest) for printing
+      allSessions.sort((a, b) {
+        DateTime aDate = DateTime.now();
+        DateTime bDate = DateTime.now();
+        
+        if (a.containsKey('date')) {
+          try {
+            aDate = DateTime.parse(a['date']);
+          } catch (e) {}
+        } else if (a.containsKey('timestamp')) {
+          final timestamp = a['timestamp'];
+          if (timestamp is int) {
+            aDate = DateTime.fromMillisecondsSinceEpoch(timestamp);
+          } else if (timestamp is String && int.tryParse(timestamp) != null) {
+            aDate = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+          }
+        }
+        
+        if (b.containsKey('date')) {
+          try {
+            bDate = DateTime.parse(b['date']);
+          } catch (e) {}
+        } else if (b.containsKey('timestamp')) {
+          final timestamp = b['timestamp'];
+          if (timestamp is int) {
+            bDate = DateTime.fromMillisecondsSinceEpoch(timestamp);
+          } else if (timestamp is String && int.tryParse(timestamp) != null) {
+            bDate = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+          }
+        }
+        
+        return aDate.compareTo(bDate);
+      });
+      
+      // Find the index of the current session
+      _selectedSessionIndex = allSessions.indexWhere((session) => 
+        session['sessionId'] == currentSession['sessionId']);
+      if (_selectedSessionIndex == -1) _selectedSessionIndex = 0;
+    }
+    
+    // Debug print to check course information
+    print("Course Info Debug: department=${currentSession['department']}, course=${currentSession['course']}, year=${currentSession['year']}, semester=${currentSession['semester']}");
+    
+    // Calculate week and day information for the current session
+    if (currentSession.containsKey('date') && !currentSession.containsKey('weekInfo')) {
+      try {
+        final date = DateTime.parse(currentSession['date']);
+        final weekOfMonth = _getWeekOfMonth(date);
+        final monthName = DateFormat('MMMM').format(date);
+        final dayOfWeek = DateFormat('EEEE').format(date);
+        
+        currentSession['weekInfo'] = 'Week $weekOfMonth of $monthName';
+        currentSession['dayInfo'] = '$dayOfWeek, ${date.day}';
+      } catch (e) {
+        print('Error calculating week info: $e');
+      }
+    }
+    
+    final unitCode = currentSession['unitCode'] ?? 'Unknown Unit Code';
+    final unitName = currentSession['unitName'] ?? 'Unknown Unit Name';
+    final course = currentSession['course'] ?? '';
+    final year = currentSession['year'] ?? '';
+    final semester = currentSession['semester'] ?? '';
+    final timeStr = currentSession.containsKey('startTime') && currentSession.containsKey('endTime')
+      ? '${currentSession['startTime']} - ${currentSession['endTime']}'
+      : '';
+    
+    // Format date from timestamp
+    String dateStr = '';
+    if (currentSession.containsKey('date')) {
+      dateStr = currentSession['date'];
+    } else if (currentSession.containsKey('timestamp')) {
+      try {
+        final timestamp = currentSession['timestamp'];
+        DateTime date;
+        if (timestamp is int) {
+          date = DateTime.fromMillisecondsSinceEpoch(timestamp);
+        } else if (timestamp is String) {
+          if (int.tryParse(timestamp) != null) {
+            date = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+          } else {
+            date = DateTime.parse(timestamp);
+          }
+        } else {
+          // If no valid timestamp, try to get date from sessionId
+          final sessionId = currentSession['sessionId']?.toString();
+          if (sessionId != null && int.tryParse(sessionId) != null) {
+            date = DateTime.fromMillisecondsSinceEpoch(int.parse(sessionId));
+          } else {
+            date = DateTime.now();
+          }
+        }
+        dateStr = DateFormat('yyyy-MM-dd').format(date);
+      } catch (e) {
+        dateStr = DateTime.now().toString().substring(0, 10);
+      }
+    } else {
+      // If no date or timestamp, try to get date from sessionId
+      final sessionId = currentSession['sessionId']?.toString();
+      if (sessionId != null && int.tryParse(sessionId) != null) {
+        final date = DateTime.fromMillisecondsSinceEpoch(int.parse(sessionId));
+        dateStr = DateFormat('yyyy-MM-dd').format(date);
+      } else {
+        dateStr = DateTime.now().toString().substring(0, 10);
+      }
+    }
+    
+    // Get attendee list and calculate present/absent counts
+    final attendeeDetails = currentSession['attendeeDetails'] as List<dynamic>? ?? [];
+    
+    // Properly calculate present and absent counts from the actual attendee details
+    int presentCount = 0;
+    int absentCount = 0;
+    
+    for (var attendee in attendeeDetails) {
+      final details = attendee['details'];
+      bool isAbsent = false;
+      
+      if (details is Map) {
+        if (details.containsKey('status') && details['status'] == 'absent') {
+          isAbsent = true;
+        } else if (details.containsKey('timestamp') && details['timestamp'] == null) {
+          isAbsent = true;
+        }
+      }
+      
+      if (isAbsent) {
+        absentCount++;
+      } else {
+        presentCount++;
+      }
+    }
+    
+    final totalExpected = presentCount + absentCount;
+    
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Print Attendance'),
+        backgroundColor: Colors.blue,
+        actions: [
+          // Add session navigation if there are multiple sessions
+          if (allSessions.length > 1)
+            Row(
+              children: [
+                IconButton(
+                  icon: Icon(Icons.arrow_back_ios),
+                  onPressed: _selectedSessionIndex > 0
+                    ? () {
+                        setState(() {
+                          _selectedSessionIndex--;
+                        });
+                      }
+                    : null,
+                  tooltip: 'Previous session',
+                ),
+                Text('${_selectedSessionIndex + 1}/${allSessions.length}'),
+                IconButton(
+                  icon: Icon(Icons.arrow_forward_ios),
+                  onPressed: _selectedSessionIndex < allSessions.length - 1
+                    ? () {
+                        setState(() {
+                          _selectedSessionIndex++;
+                        });
+                      }
+                    : null,
+                  tooltip: 'Next session',
+                ),
+              ],
+            ),
+          // Visual Analysis button
+          IconButton(
+            icon: Icon(Icons.analytics),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => AnalysisPage(
+                    sessionData: currentSession,
+                    relatedSessions: allSessions.length > 1 ? allSessions : null,
+                  ),
+                ),
+              );
+            },
+            tooltip: 'Visual Analysis',
+          ),
+          // Add combined print option if there are multiple sessions
+          if (allSessions.length > 1)
+            PopupMenuButton<String>(
+              icon: Icon(Icons.print),
+              tooltip: 'Print options',
+              onSelected: (String value) {
+                if (value == 'current') {
+                  _printScreen();
+                } else if (value == 'combined') {
+                  _printMultipleSessions();
+                }
+              },
+              itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+                PopupMenuItem<String>(
+                  value: 'current',
+                  child: Row(
+                    children: [
+                      Icon(Icons.file_present, color: Colors.blue),
+                      SizedBox(width: 8),
+                      Text('Print current session'),
+                    ],
+                  ),
+                ),
+                PopupMenuItem<String>(
+                  value: 'combined',
+                  child: Row(
+                    children: [
+                      Icon(Icons.library_books, color: Colors.green),
+                      SizedBox(width: 8),
+                      Text('Print all sessions'),
+                    ],
+                  ),
+                ),
+              ],
+            )
+          else
+            IconButton(
+              icon: Icon(Icons.print),
+              onPressed: _isLoading ? null : () => _printScreen(),
+              tooltip: 'Print Attendance',
+            ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        child: RepaintBoundary(
+          key: _printKey,
+          child: Container(
+            color: Colors.white,
+            padding: EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // University header with logo
+                Center(
+                  child: Image.asset(
+                    'assets/images/university_logo.png',
+                    width: double.infinity,
+                    height: 100,
+                    fit: BoxFit.cover,
+                  ),
+                ),
+                SizedBox(height: 20),
+                
+                // Attendance record header
+                Center(
+                  child: Text(
+                    'ATTENDANCE RECORD',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ),
+                SizedBox(height: 16),
+                
+                // Course and unit information - Make course info stand out more
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (currentSession['department'] != null) 
+                            Text('Department: ${currentSession['department']}', 
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                                color: Colors.blue.shade800
+                              )),
+                          if (currentSession['course'] != null) 
+                            Text('Course: ${currentSession['course']}', 
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                                color: Colors.blue.shade800
+                              )),
+                          // Always display year and semester
+                          Text('Year: ${currentSession['year'] ?? "3"}, Semester: ${currentSession['semester'] ?? "2"}', 
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                              color: Colors.blue.shade800
+                            )),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                
+                SizedBox(height: 8),
+                
+                // Unit information
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Unit Code: $unitCode', style: TextStyle(fontWeight: FontWeight.bold)),
+                          Text('Unit Title: $unitName', style: TextStyle(fontWeight: FontWeight.bold)),
+                          if (currentSession.containsKey('weekInfo')) 
+                            Text(currentSession['weekInfo'], style: TextStyle(fontWeight: FontWeight.bold)),
+                          if (currentSession.containsKey('dayInfo')) 
+                            Text(currentSession['dayInfo'], style: TextStyle(fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Text('Date: $dateStr', style: TextStyle(fontWeight: FontWeight.bold)),
+                          if (timeStr.isNotEmpty) Text('Time: $timeStr'),
+                          Text('Total Students: $totalExpected'),
+                          Text('Present: $presentCount | Absent: $absentCount', 
+                            style: TextStyle(
+                              color: absentCount > 0 ? Colors.red : Colors.green,
+                              fontWeight: FontWeight.bold
+                            )
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                SizedBox(height: 30),
+                
+                // Attendance table
+                Table(
+                  border: TableBorder.all(),
+                  columnWidths: {
+                    0: FlexColumnWidth(0.5),  // No.
+                    1: FlexColumnWidth(3),    // Name
+                    2: FlexColumnWidth(3),    // Email
+                    3: FlexColumnWidth(1.5),  // Time
+                    4: FlexColumnWidth(1),    // Status
+                  },
+                  children: [
+                    // Table header
+                    TableRow(
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade200,
+                      ),
+                      children: [
+                        _tableCell('No.', isHeader: true),
+                        _tableCell('Student Name', isHeader: true),
+                        _tableCell('Email', isHeader: true),
+                        _tableCell('Time Marked', isHeader: true),
+                        _tableCell('Status', isHeader: true),
+                      ],
+                    ),
+                    // Table data rows
+                    ...List.generate(attendeeDetails.length, (index) {
+                      final attendee = attendeeDetails[index];
+                      final details = attendee['details'];
+                      
+                      // Extract email
+                      final String email = attendee['email'] ?? '';
+                      
+                      // Extract student name with fallback to email username
+                      String name;
+                      if (details is Map) {
+                        name = details['name'] ?? details['studentName'] ?? '';
+                        
+                        // Replace generic "Student" with better info
+                        if (name == 'Student' || name.isEmpty || name == 'Unknown') {
+                          // Use email username as fallback
+                          name = email.contains('@') ? email.split('@').first : email;
+                          
+                          // Then try to look up real name from SharedPreferences
+                          SharedPreferences.getInstance().then((prefs) {
+                            final userData = prefs.getString(email);
+                            if (userData != null) {
+                              try {
+                                final Map<String, dynamic> user = json.decode(userData);
+                                if (user.containsKey('name') && user['name'] != null && 
+                                    user['name'].toString().isNotEmpty && user['name'] != 'Student') {
+                                  // This won't change current display but will update the data for next render
+                                  details['name'] = user['name'];
+                                  details['studentName'] = user['name'];
+                                }
+                              } catch (e) {
+                                print('Error parsing user data for $email: $e');
+                              }
+                            }
+                          });
+                        }
+                      } else {
+                        name = email.contains('@') ? email.split('@').first : email;
+                      }
+                      
+                      // Determine if student is absent
+                      bool isAbsent = false;
+                      if (details is Map) {
+                        if (details.containsKey('status') && details['status'] == 'absent') {
+                          isAbsent = true;
+                        } else if (details.containsKey('timestamp') && details['timestamp'] == null) {
+                          isAbsent = true;
+                        }
+                      }
+                      
+                      // Extract time
+                      String timeMarked = '';
+                      if (details is Map) {
+                        if (isAbsent) {
+                          timeMarked = 'null';
+                        } else if (details.containsKey('timestamp')) {
+                        try {
+                          final timestamp = details['timestamp'];
+                          DateTime dateTime;
+                          if (timestamp is int) {
+                            dateTime = DateTime.fromMillisecondsSinceEpoch(timestamp);
+                          } else if (timestamp is String) {
+                            dateTime = DateTime.parse(timestamp);
+                          } else {
+                            dateTime = DateTime.now();
+                          }
+                          timeMarked = '${dateTime.hour}:${dateTime.minute.toString().padLeft(2, '0')}';
+                        } catch (e) {
+                          timeMarked = 'Unknown';
+                          }
+                        }
+                      }
+                      
+                      return TableRow(
+                        decoration: BoxDecoration(
+                          color: isAbsent 
+                              ? Colors.red.withOpacity(0.1) 
+                              : (index % 2 == 0 ? Colors.white : Colors.grey.shade50),
+                        ),
+                        children: [
+                          _tableCell('${index + 1}'),
+                          _tableCell(name, isAbsent: isAbsent),
+                          _tableCell(email, isAbsent: isAbsent),
+                          _tableCell(timeMarked, isAbsent: isAbsent),
+                          _tableCell(isAbsent ? 'Absent' : 'Present', 
+                            isAbsent: isAbsent, 
+                            textAlign: TextAlign.center
+                          ),
+                        ],
+                      );
+                    }),
+                  ],
+                ),
+                
+                SizedBox(height: 40),
+                
+                // Approved section with QR code
+                Center(
+                  child: Column(
+                    children: [
+                      Text('Approved', style: TextStyle(fontWeight: FontWeight.bold)),
+                      SizedBox(height: 10),
+                      Image.asset(
+                        'assets/images/icon.png',
+                        width: 100,
+                        height: 100,
+                      ),
+                    ],
+                  ),
+                ),
+                
+                SizedBox(height: 40),
+                
+                Center(
+                  child: Text(
+                    'TUN is ISO 9001:2015 Certified.',
+                    style: TextStyle(
+                      fontStyle: FontStyle.italic,
+                      color: Colors.grey,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+  
+  // Helper method to create table cells
+  Widget _tableCell(String text, {bool isHeader = false, bool isAbsent = false, TextAlign textAlign = TextAlign.left}) {
+    return Container(
+      padding: EdgeInsets.all(8),
+      child: Text(
+        text,
+        textAlign: isHeader ? TextAlign.center : textAlign,
+        style: TextStyle(
+          fontWeight: isHeader ? FontWeight.bold : FontWeight.normal,
+          color: isAbsent ? Colors.red : null,
+          fontStyle: isAbsent ? FontStyle.italic : FontStyle.normal,
+        ),
+      ),
+    );
+  }
+
+  // Method to handle printing
+  Future<void> _printScreen() async {
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      // Create PDF document directly rather than taking a screenshot
+      final pdf = pw.Document();
+      
+      // Get current session data
+      final session = widget.relatedSessions?[_selectedSessionIndex] ?? widget.sessionData;
+      
+      // Load logo image for PDF
+      final ByteData? logoData = await rootBundle.load('assets/images/university_logo.png');
+      final Uint8List? logoBytes = logoData?.buffer.asUint8List();
+      final pw.MemoryImage? logoImage = logoBytes != null ? pw.MemoryImage(logoBytes) : null;
+      
+      // Load QR code image for PDF
+      final ByteData? qrData = await rootBundle.load('assets/images/icon.png');
+      final Uint8List? qrBytes = qrData?.buffer.asUint8List();
+      final pw.MemoryImage? qrImage = qrBytes != null ? pw.MemoryImage(qrBytes) : null;
+      
+      // Format date and extract other session info
+      String dateStr = '';
+      if (session.containsKey('date')) {
+        dateStr = session['date'];
+      } else if (session.containsKey('timestamp')) {
+        try {
+          final timestamp = session['timestamp'];
+          DateTime date;
+          if (timestamp is int) {
+            date = DateTime.fromMillisecondsSinceEpoch(timestamp);
+          } else if (timestamp is String) {
+            if (int.tryParse(timestamp) != null) {
+              date = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+            } else {
+              date = DateTime.parse(timestamp);
+            }
+          } else {
+            date = DateTime.now();
+          }
+          dateStr = DateFormat('yyyy-MM-dd').format(date);
+        } catch (e) {
+          dateStr = DateTime.now().toString().substring(0, 10);
+        }
+      }
+      
+      // Extract other session info
+      final unitCode = session['unitCode'] ?? 'Unknown Unit Code';
+      final unitName = session['unitName'] ?? 'Unknown Unit Name';
+      
+      // Print debug information to identify course data issues
+      print('Debug Session Data: ${json.encode(session)}');
+      
+      // Try to get course information from session, then from attendees if needed
+      String department = session['department'] ?? '';
+      String course = session['course'] ?? '';
+      String year = session['year']?.toString() ?? '';
+      String semester = session['semester']?.toString() ?? '';
+      
+      // If department, course, year or semester is missing, try to get it from attendees
+      if (department.isEmpty || course.isEmpty || year.isEmpty || semester.isEmpty) {
+        if (session.containsKey('attendees') && session['attendees'] is List && session['attendees'].isNotEmpty) {
+          final attendees = session['attendees'];
+          for (var attendee in attendees) {
+            if (attendee is Map) {
+              if (department.isEmpty && attendee.containsKey('department')) {
+                department = attendee['department'] ?? '';
+              }
+              if (course.isEmpty && attendee.containsKey('course')) {
+                course = attendee['course'] ?? '';
+              }
+              if (year.isEmpty && attendee.containsKey('year')) {
+                year = attendee['year']?.toString() ?? '';
+              }
+              if (semester.isEmpty && attendee.containsKey('semester')) {
+                semester = attendee['semester']?.toString() ?? '';
+              }
+              
+              // Break if we've found all the information we need
+              if (department.isNotEmpty && course.isNotEmpty && 
+                  year.isNotEmpty && semester.isNotEmpty) {
+                break;
+              }
+            }
+          }
+        }
+      }
+      
+      // If still missing, don't set defaults, leave as extracted
+      print('Course Info Extracted: department=$department, course=$course, year=$year, semester=$semester');
+      
+      // Get time info
+      final timeStr = session.containsKey('startTime') && session.containsKey('endTime')
+        ? '${session['startTime']} - ${session['endTime']}'
+        : '';
+        
+      // Get attendee list and calculate present/absent counts
+      final attendeeDetails = session['attendeeDetails'] as List<dynamic>? ?? [];
+      
+      // Calculate present and absent counts
+      int presentCount = 0;
+      int absentCount = 0;
+      
+      for (var attendee in attendeeDetails) {
+        final details = attendee['details'];
+        bool isAbsent = false;
+        
+        if (details is Map) {
+          if (details.containsKey('status') && details['status'] == 'absent') {
+            isAbsent = true;
+          } else if (details.containsKey('timestamp') && details['timestamp'] == null) {
+            isAbsent = true;
+          }
+        }
+        
+        if (isAbsent) {
+          absentCount++;
+        } else {
+          presentCount++;
+        }
+      }
+      
+      final totalExpected = presentCount + absentCount;
+      
+      // Add page to PDF document
+      pdf.addPage(
+        pw.Page(
+          pageFormat: PdfPageFormat.a4,
+          build: (pw.Context context) {
+            // Get the date string for this session
+            String dateStr;
+            if (session.containsKey('date')) {
+              dateStr = session['date'];
+            } else if (session.containsKey('timestamp')) {
+              try {
+                final timestamp = session['timestamp'];
+                DateTime date;
+                if (timestamp is int) {
+                  date = DateTime.fromMillisecondsSinceEpoch(timestamp);
+                } else if (timestamp is String) {
+                  if (int.tryParse(timestamp) != null) {
+                    date = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+                  } else {
+                    date = DateTime.parse(timestamp);
+                  }
+                } else {
+                  final sessionId = session['sessionId']?.toString();
+                  if (sessionId != null && int.tryParse(sessionId) != null) {
+                    date = DateTime.fromMillisecondsSinceEpoch(int.parse(sessionId));
+                  } else {
+                    date = DateTime.now();
+                  }
+                }
+                dateStr = DateFormat('yyyy-MM-dd').format(date);
+              } catch (e) {
+                dateStr = DateTime.now().toString().substring(0, 10);
+              }
+            } else {
+              final sessionId = session['sessionId']?.toString();
+              if (sessionId != null && int.tryParse(sessionId) != null) {
+                final date = DateTime.fromMillisecondsSinceEpoch(int.parse(sessionId));
+                dateStr = DateFormat('yyyy-MM-dd').format(date);
+              } else {
+                dateStr = DateTime.now().toString().substring(0, 10);
+              }
+            }
+
+            // Extract course, year, and semester information
+            final course = session['course'] ?? 'Unknown Course';
+            final year = session['year'] ?? '';
+            final semester = session['semester'] ?? '';
+            final department = session['department'] ?? 'Unknown Department';
+            final weekInfo = session['weekInfo'] ?? '';
+            final dayInfo = session['dayInfo'] ?? '';
+
+            return pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                // University header with logo at top
+                pw.Center(
+                  child: logoImage != null 
+                    ? pw.Container(
+                        height: 100,
+                        width: double.infinity,
+                        child: pw.Image(logoImage, fit: pw.BoxFit.contain),
+                      )
+                    : pw.Container(
+                        height: 70,
+                        child: pw.Text('UNIVERSITY LOGO', 
+                          style: pw.TextStyle(
+                            fontSize: 24, 
+                            fontWeight: pw.FontWeight.bold
+                          )
+                        ),
+                      ),
+                ),
+                
+                pw.SizedBox(height: 20),
+                
+                // Attendance record header
+                pw.Center(
+                  child: pw.Text(
+                    'ATTENDANCE RECORD',
+                    style: pw.TextStyle(
+                      fontSize: 18,
+                      fontWeight: pw.FontWeight.bold,
+                      decoration: pw.TextDecoration.underline,
+                    ),
+                  ),
+                ),
+                pw.SizedBox(height: 16),
+                
+                // Academic information section - displayed prominently
+                pw.Container(
+                  padding: pw.EdgeInsets.all(10),
+                  margin: pw.EdgeInsets.only(bottom: 16),
+                  decoration: pw.BoxDecoration(
+                    color: PdfColors.grey100,
+                    border: pw.Border.all(color: PdfColors.blue800, width: 1),
+                  ),
+                  child: pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      if (department.isNotEmpty)
+                        pw.Text('Department: $department', 
+                          style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 12)),
+                      if (course.isNotEmpty)
+                        pw.Text('Course: $course', 
+                          style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 12)),
+                      pw.Text('Year: ${year.isNotEmpty ? year : "3"}, Semester: ${semester.isNotEmpty ? semester : "2"}', 
+                        style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 12, color: PdfColors.blue800)),
+                    ],
+                  ),
+                ),
+                
+                // Unit header information
+                pw.Row(
+                  children: [
+                    pw.Expanded(
+                      child: pw.Column(
+                        crossAxisAlignment: pw.CrossAxisAlignment.start,
+                        children: [
+                          pw.Text('Unit Code: $unitCode', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                          pw.Text('Unit Title: $unitName', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                          // Remove duplicated department & course info
+                          if (session.containsKey('weekInfo')) 
+                            pw.Text(session['weekInfo'], style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                          if (session.containsKey('dayInfo')) 
+                            pw.Text(session['dayInfo'], style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                        ],
+                      ),
+                    ),
+                    pw.Expanded(
+                      child: pw.Column(
+                        crossAxisAlignment: pw.CrossAxisAlignment.end,
+                        children: [
+                          pw.Text('Date: $dateStr', 
+                            style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                          if (timeStr.isNotEmpty) pw.Text('Time: $timeStr'),
+                          pw.Text('Total Students: $totalExpected'),
+                          pw.Text('Present: $presentCount | Absent: $absentCount'),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                pw.SizedBox(height: 30),
+                
+                // Attendance table
+                pw.Table(
+                  border: pw.TableBorder.all(),
+                  columnWidths: {
+                    0: pw.FlexColumnWidth(0.5),  // No.
+                    1: pw.FlexColumnWidth(3),    // Name
+                    2: pw.FlexColumnWidth(3),    // Email
+                    3: pw.FlexColumnWidth(1.5),  // Time
+                    4: pw.FlexColumnWidth(1),    // Status
+                  },
+                  children: [
+                    // Table header
+                    pw.TableRow(
+                      decoration: pw.BoxDecoration(
+                        color: PdfColors.grey200,
+                      ),
+                      children: [
+                        _pdfTableCell('No.', isHeader: true),
+                        _pdfTableCell('Student Name', isHeader: true),
+                        _pdfTableCell('Email', isHeader: true),
+                        _pdfTableCell('Time Marked', isHeader: true),
+                        _pdfTableCell('Status', isHeader: true),
+                      ],
+                    ),
+                    // Table data rows
+                    ...List.generate(attendeeDetails.length, (index) {
+                      final attendee = attendeeDetails[index];
+                      final details = attendee['details'];
+                      
+                      // Extract email
+                      final String email = attendee['email'] ?? '';
+                      
+                      // Extract student name with fallback to email username
+                      String name;
+                      if (details is Map) {
+                        name = details['name'] ?? details['studentName'] ?? '';
+                        
+                        // Replace generic "Student" with better info
+                        if (name == 'Student' || name.isEmpty || name == 'Unknown') {
+                          // Use email username as fallback
+                          name = email.contains('@') ? email.split('@').first : email;
+                          
+                          // Then try to look up real name from SharedPreferences
+                          SharedPreferences.getInstance().then((prefs) {
+                            final userData = prefs.getString(email);
+                            if (userData != null) {
+                              try {
+                                final Map<String, dynamic> user = json.decode(userData);
+                                if (user.containsKey('name') && user['name'] != null && 
+                                    user['name'].toString().isNotEmpty && user['name'] != 'Student') {
+                                  // This won't change current display but will update the data for next render
+                                  details['name'] = user['name'];
+                                  details['studentName'] = user['name'];
+                                }
+                              } catch (e) {
+                                print('Error parsing user data for $email: $e');
+                              }
+                            }
+                          });
+                        }
+                      } else {
+                        name = email.contains('@') ? email.split('@').first : email;
+                      }
+                      
+                      // Determine if student is absent
+                      bool isAbsent = false;
+                      if (details is Map) {
+                        if (details.containsKey('status') && details['status'] == 'absent') {
+                          isAbsent = true;
+                        } else if (details.containsKey('timestamp') && details['timestamp'] == null) {
+                          isAbsent = true;
+                        }
+                      }
+                      
+                      // Extract time
+                      String timeMarked = '';
+                      if (details is Map) {
+                        if (isAbsent) {
+                          timeMarked = 'null';
+                        } else if (details.containsKey('timestamp')) {
+                          try {
+                            final timestamp = details['timestamp'];
+                            DateTime dateTime;
+                            if (timestamp is int) {
+                              dateTime = DateTime.fromMillisecondsSinceEpoch(timestamp);
+                            } else if (timestamp is String) {
+                              dateTime = DateTime.parse(timestamp);
+                            } else {
+                              dateTime = DateTime.now();
+                            }
+                            timeMarked = '${dateTime.hour}:${dateTime.minute.toString().padLeft(2, '0')}';
+                          } catch (e) {
+                            timeMarked = 'Unknown';
+                          }
+                        }
+                      }
+                      
+                      final isEvenRow = index % 2 == 0;
+                      final rowColor = isAbsent 
+                          ? PdfColors.red50
+                          : (isEvenRow ? PdfColors.white : PdfColors.grey50);
+                          
+                      return pw.TableRow(
+                        decoration: pw.BoxDecoration(
+                          color: rowColor,
+                        ),
+                        children: [
+                          _pdfTableCell('${index + 1}'),
+                          _pdfTableCell(name, isAbsent: isAbsent),
+                          _pdfTableCell(email, isAbsent: isAbsent),
+                          _pdfTableCell(timeMarked, isAbsent: isAbsent),
+                          _pdfTableCell(isAbsent ? 'Absent' : 'Present', 
+                            isAbsent: isAbsent, 
+                            textAlign: pw.TextAlign.center
+                          ),
+                        ],
+                      );
+                    }),
+                  ],
+                ),
+                
+                pw.Spacer(), // Push the footer to the bottom of the page
+                
+                // Approval section at bottom
+                pw.Center(
+                  child: pw.Column(
+                    children: [
+                      pw.Text('Approved', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                      pw.SizedBox(height: 10),
+                      qrImage != null
+                        ? pw.Container(
+                            width: 100,
+                            height: 100,
+                            child: pw.Image(qrImage),
+                          )
+                        : pw.Container(
+                            width: 100,
+                            height: 100,
+                            child: pw.Center(
+                              child: pw.Text('QR CODE'),
+                            ),
+                          ),
+                    ],
+                  ),
+                ),
+                
+                pw.SizedBox(height: 20),
+                
+                pw.Center(
+                  child: pw.Text(
+                    'TUN is ISO 9001:2015 Certified.',
+                    style: pw.TextStyle(
+                      fontStyle: pw.FontStyle.italic,
+                      color: PdfColors.grey,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      );
+      
+      await Printing.layoutPdf(
+        onLayout: (PdfPageFormat format) async => pdf.save(),
+      );
+    } catch (e) {
+      print('Error printing: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error printing: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  // New method to print multiple sessions at once
+  Future<void> _printMultipleSessions() async {
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      final pdf = pw.Document();
+      
+      // Get all related sessions or just the current one if no related sessions
+      List<Map<String, dynamic>> sessionsToPrint = widget.relatedSessions ?? [widget.sessionData];
+      
+      // Sort sessions chronologically (oldest to newest)
+      sessionsToPrint.sort((a, b) {
+        DateTime aDate = DateTime.now();
+        DateTime bDate = DateTime.now();
+        
+        if (a.containsKey('date')) {
+          try {
+            aDate = DateTime.parse(a['date']);
+          } catch (e) {}
+        } else if (a.containsKey('timestamp')) {
+          final timestamp = a['timestamp'];
+          if (timestamp is int) {
+            aDate = DateTime.fromMillisecondsSinceEpoch(timestamp);
+          } else if (timestamp is String && int.tryParse(timestamp) != null) {
+            aDate = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+          }
+        }
+        
+        if (b.containsKey('date')) {
+          try {
+            bDate = DateTime.parse(b['date']);
+          } catch (e) {}
+        } else if (b.containsKey('timestamp')) {
+          final timestamp = b['timestamp'];
+          if (timestamp is int) {
+            bDate = DateTime.fromMillisecondsSinceEpoch(timestamp);
+          } else if (timestamp is String && int.tryParse(timestamp) != null) {
+            bDate = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+          }
+        }
+        
+        return aDate.compareTo(bDate);
+      });
+
+      // Get sample session for header info (unit code, name, etc.)
+      final sampleSession = sessionsToPrint.first;
+      final unitCode = sampleSession['unitCode'] ?? 'Unknown Unit Code';
+      final unitName = sampleSession['unitName'] ?? 'Unknown Unit Name';
+      final course = sampleSession['course'] ?? '';
+      final year = sampleSession['year'] ?? '';
+      final semester = sampleSession['semester'] ?? '';
+      
+      // Load logo image for PDF
+      final ByteData? logoData = await rootBundle.load('assets/images/university_logo.png');
+      final Uint8List? logoBytes = logoData?.buffer.asUint8List();
+      final pw.MemoryImage? logoImage = logoBytes != null ? pw.MemoryImage(logoBytes) : null;
+      
+      // Load QR code image for PDF
+      final ByteData? qrData = await rootBundle.load('assets/images/icon.png');
+      final Uint8List? qrBytes = qrData?.buffer.asUint8List();
+      final pw.MemoryImage? qrImage = qrBytes != null ? pw.MemoryImage(qrBytes) : null;
+      
+      // Add pages to the PDF document
+      for (int i = 0; i < sessionsToPrint.length; i++) {
+        final isLastPage = i == sessionsToPrint.length - 1;
+        final session = sessionsToPrint[i];
+        
+        // Calculate week and day information for the current session
+        if (session.containsKey('date') && !session.containsKey('weekInfo')) {
+          try {
+            final date = DateTime.parse(session['date']);
+            final weekOfMonth = _getWeekOfMonth(date);
+            final monthName = DateFormat('MMMM').format(date);
+            final dayOfWeek = DateFormat('EEEE').format(date);
+            
+            session['weekInfo'] = 'Week $weekOfMonth of $monthName';
+            session['dayInfo'] = '$dayOfWeek, ${date.day}';
+          } catch (e) {
+            print('Error calculating week info: $e');
+          }
+        }
+        
+        // Format date from timestamp
+        String dateStr = '';
+        if (session.containsKey('date')) {
+          dateStr = session['date'];
+        } else if (session.containsKey('timestamp')) {
+          try {
+            final timestamp = session['timestamp'];
+            DateTime date;
+            if (timestamp is int) {
+              date = DateTime.fromMillisecondsSinceEpoch(timestamp);
+            } else if (timestamp is String) {
+              if (int.tryParse(timestamp) != null) {
+                date = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+              } else {
+                date = DateTime.parse(timestamp);
+              }
+            } else {
+              date = DateTime.now();
+            }
+            dateStr = DateFormat('yyyy-MM-dd').format(date);
+          } catch (e) {
+            dateStr = DateTime.now().toString().substring(0, 10);
+          }
+        } else {
+          dateStr = DateTime.now().toString().substring(0, 10);
+        }
+        
+        // Extract time information
+        final timeStr = session.containsKey('startTime') && session.containsKey('endTime')
+          ? '${session['startTime']} - ${session['endTime']}'
+          : '';
+          
+        // Get attendee list and calculate present/absent counts
+        final attendeeDetails = session['attendeeDetails'] as List<dynamic>? ?? [];
+        
+        // Calculate present and absent counts
+        int presentCount = 0;
+        int absentCount = 0;
+        
+        for (var attendee in attendeeDetails) {
+          final details = attendee['details'];
+          bool isAbsent = false;
+          
+          if (details is Map) {
+            if (details.containsKey('status') && details['status'] == 'absent') {
+              isAbsent = true;
+            } else if (details.containsKey('timestamp') && details['timestamp'] == null) {
+              isAbsent = true;
+            }
+          }
+          
+          if (isAbsent) {
+            absentCount++;
+          } else {
+            presentCount++;
+          }
+        }
+        
+        final totalExpected = presentCount + absentCount;
+        
+        // Create a page for the current session
+        pdf.addPage(
+          pw.Page(
+            pageFormat: PdfPageFormat.a4,
+            build: (pw.Context context) {
+              // Get the date string for this session
+              String dateStr;
+              if (session.containsKey('date')) {
+                dateStr = session['date'];
+              } else if (session.containsKey('timestamp')) {
+                try {
+                  final timestamp = session['timestamp'];
+                  DateTime date;
+                  if (timestamp is int) {
+                    date = DateTime.fromMillisecondsSinceEpoch(timestamp);
+                  } else if (timestamp is String) {
+                    if (int.tryParse(timestamp) != null) {
+                      date = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+                    } else {
+                      date = DateTime.parse(timestamp);
+                    }
+                  } else {
+                    final sessionId = session['sessionId']?.toString();
+                    if (sessionId != null && int.tryParse(sessionId) != null) {
+                      date = DateTime.fromMillisecondsSinceEpoch(int.parse(sessionId));
+                    } else {
+                      date = DateTime.now();
+                    }
+                  }
+                  dateStr = DateFormat('yyyy-MM-dd').format(date);
+                } catch (e) {
+                  dateStr = DateTime.now().toString().substring(0, 10);
+                }
+              } else {
+                final sessionId = session['sessionId']?.toString();
+                if (sessionId != null && int.tryParse(sessionId) != null) {
+                  final date = DateTime.fromMillisecondsSinceEpoch(int.parse(sessionId));
+                  dateStr = DateFormat('yyyy-MM-dd').format(date);
+                } else {
+                  dateStr = DateTime.now().toString().substring(0, 10);
+                }
+              }
+
+              // Extract course, year, and semester information
+              String course = session['course'] ?? '';
+              String year = session['year']?.toString() ?? '';
+              String semester = session['semester']?.toString() ?? '';
+              String department = session['department'] ?? '';
+              
+              // If department, course, year or semester is missing, try to get it from attendees
+              if (department.isEmpty || course.isEmpty || year.isEmpty || semester.isEmpty) {
+                if (session.containsKey('attendees') && session['attendees'] is List && session['attendees'].isNotEmpty) {
+                  final attendees = session['attendees'];
+                  for (var attendee in attendees) {
+                    if (attendee is Map) {
+                      if (department.isEmpty && attendee.containsKey('department')) {
+                        department = attendee['department'] ?? '';
+                      }
+                      if (course.isEmpty && attendee.containsKey('course')) {
+                        course = attendee['course'] ?? '';
+                      }
+                      if (year.isEmpty && attendee.containsKey('year')) {
+                        year = attendee['year']?.toString() ?? '';
+                      }
+                      if (semester.isEmpty && attendee.containsKey('semester')) {
+                        semester = attendee['semester']?.toString() ?? '';
+                      }
+                      
+                      // Break if we've found all the information we need
+                      if (department.isNotEmpty && course.isNotEmpty && 
+                          year.isNotEmpty && semester.isNotEmpty) {
+                        break;
+                      }
+                    }
+                  }
+                }
+              }
+              
+              // Don't set defaults, leave as extracted
+              final weekInfo = session['weekInfo'] ?? '';
+              final dayInfo = session['dayInfo'] ?? '';
+              
+              // Print debug info
+              print('Multiple Session Debug: department=$department, course=$course, year=$year, semester=$semester');
+
+              return pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  // University header with logo - at the top of every page
+                  pw.Center(
+                    child: logoImage != null 
+                      ? pw.Container(
+                          height: 100,
+                          width: double.infinity,
+                          child: pw.Image(logoImage, fit: pw.BoxFit.contain),
+                        )
+                      : pw.Container(
+                          height: 70,
+                          child: pw.Text('UNIVERSITY LOGO', 
+                            style: pw.TextStyle(
+                              fontSize: 24, 
+                              fontWeight: pw.FontWeight.bold
+                            )
+                          ),
+                        ),
+                  ),
+                  
+                  pw.SizedBox(height: 20),
+                  
+                  // Attendance record header
+                  pw.Center(
+                    child: pw.Text(
+                      'ATTENDANCE RECORD',
+                      style: pw.TextStyle(
+                        fontSize: 18,
+                        fontWeight: pw.FontWeight.bold,
+                        decoration: pw.TextDecoration.underline,
+                      ),
+                    ),
+                  ),
+                  pw.SizedBox(height: 16),
+                  
+                  // Academic information section - displayed prominently
+                  pw.Container(
+                    padding: pw.EdgeInsets.all(10),
+                    margin: pw.EdgeInsets.only(bottom: 16),
+                    decoration: pw.BoxDecoration(
+                      color: PdfColors.grey100,
+                      border: pw.Border.all(color: PdfColors.blue800, width: 1),
+                    ),
+                    child: pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.start,
+                      children: [
+                        if (department.isNotEmpty)
+                          pw.Text('Department: $department', 
+                            style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 12)),
+                        if (course.isNotEmpty)
+                          pw.Text('Course: $course', 
+                            style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 12)),
+                        pw.Text('Year: ${year.isNotEmpty ? year : "3"}, Semester: ${semester.isNotEmpty ? semester : "2"}', 
+                          style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 12, color: PdfColors.blue800)),
+                      ],
+                    ),
+                  ),
+                  
+                  // Unit header information
+                  pw.Row(
+                    children: [
+                      pw.Expanded(
+                        child: pw.Column(
+                          crossAxisAlignment: pw.CrossAxisAlignment.start,
+                          children: [
+                            pw.Text('Unit Code: $unitCode', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                            pw.Text('Unit Title: $unitName', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                            // Remove duplicated department & course info
+                            if (session.containsKey('weekInfo')) 
+                              pw.Text(session['weekInfo'], style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                            if (session.containsKey('dayInfo')) 
+                              pw.Text(session['dayInfo'], style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                          ],
+                        ),
+                      ),
+                      pw.Expanded(
+                        child: pw.Column(
+                          crossAxisAlignment: pw.CrossAxisAlignment.end,
+                          children: [
+                            pw.Text('Date: $dateStr', 
+                              style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                            if (timeStr.isNotEmpty) pw.Text('Time: $timeStr'),
+                            pw.Text('Total Students: $totalExpected'),
+                            pw.Text('Present: $presentCount | Absent: $absentCount'),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  pw.SizedBox(height: 30),
+                  
+                  // Attendance table
+                  pw.Table(
+                    border: pw.TableBorder.all(),
+                    columnWidths: {
+                      0: pw.FlexColumnWidth(0.5),  // No.
+                      1: pw.FlexColumnWidth(3),    // Name
+                      2: pw.FlexColumnWidth(3),    // Email
+                      3: pw.FlexColumnWidth(1.5),  // Time
+                      4: pw.FlexColumnWidth(1),    // Status
+                    },
+                    children: [
+                      // Table header
+                      pw.TableRow(
+                        decoration: pw.BoxDecoration(
+                          color: PdfColors.grey200,
+                        ),
+                        children: [
+                          _pdfTableCell('No.', isHeader: true),
+                          _pdfTableCell('Student Name', isHeader: true),
+                          _pdfTableCell('Email', isHeader: true),
+                          _pdfTableCell('Time Marked', isHeader: true),
+                          _pdfTableCell('Status', isHeader: true),
+                        ],
+                      ),
+                      // Table data rows
+                      ...List.generate(attendeeDetails.length, (index) {
+                        final attendee = attendeeDetails[index];
+                        final details = attendee['details'];
+                        
+                        // Extract email
+                        final String email = attendee['email'] ?? '';
+                        
+                        // Extract student name with fallback to email username
+                        String name;
+                        if (details is Map) {
+                          name = details['name'] ?? details['studentName'] ?? '';
+                          
+                          // Replace generic "Student" with better info
+                          if (name == 'Student' || name.isEmpty || name == 'Unknown') {
+                            // Use email username as fallback
+                            name = email.contains('@') ? email.split('@').first : email;
+                            
+                            // Then try to look up real name from SharedPreferences
+                            SharedPreferences.getInstance().then((prefs) {
+                              final userData = prefs.getString(email);
+                              if (userData != null) {
+                                try {
+                                  final Map<String, dynamic> user = json.decode(userData);
+                                  if (user.containsKey('name') && user['name'] != null && 
+                                      user['name'].toString().isNotEmpty && user['name'] != 'Student') {
+                                    // This won't change current display but will update the data for next render
+                                    details['name'] = user['name'];
+                                    details['studentName'] = user['name'];
+                                  }
+                                } catch (e) {
+                                  print('Error parsing user data for $email: $e');
+                                }
+                              }
+                            });
+                          }
+                        } else {
+                          name = email.contains('@') ? email.split('@').first : email;
+                        }
+                        
+                        // Determine if student is absent
+                        bool isAbsent = false;
+                        if (details is Map) {
+                          if (details.containsKey('status') && details['status'] == 'absent') {
+                            isAbsent = true;
+                          } else if (details.containsKey('timestamp') && details['timestamp'] == null) {
+                            isAbsent = true;
+                          }
+                        }
+                        
+                        // Extract time
+                        String timeMarked = '';
+                        if (details is Map) {
+                          if (isAbsent) {
+                            timeMarked = 'null';
+                          } else if (details.containsKey('timestamp')) {
+                            try {
+                              final timestamp = details['timestamp'];
+                              DateTime dateTime;
+                              if (timestamp is int) {
+                                dateTime = DateTime.fromMillisecondsSinceEpoch(timestamp);
+                              } else if (timestamp is String) {
+                                dateTime = DateTime.parse(timestamp);
+                              } else {
+                                dateTime = DateTime.now();
+                              }
+                              timeMarked = '${dateTime.hour}:${dateTime.minute.toString().padLeft(2, '0')}';
+                            } catch (e) {
+                              timeMarked = 'Unknown';
+                            }
+                          }
+                        }
+                        
+                        final isEvenRow = index % 2 == 0;
+                        final rowColor = isAbsent 
+                            ? PdfColors.red50
+                            : (isEvenRow ? PdfColors.white : PdfColors.grey50);
+                            
+                        return pw.TableRow(
+                          decoration: pw.BoxDecoration(
+                            color: rowColor,
+                          ),
+                          children: [
+                            _pdfTableCell('${index + 1}'),
+                            _pdfTableCell(name, isAbsent: isAbsent),
+                            _pdfTableCell(email, isAbsent: isAbsent),
+                            _pdfTableCell(timeMarked, isAbsent: isAbsent),
+                            _pdfTableCell(isAbsent ? 'Absent' : 'Present', 
+                              isAbsent: isAbsent, 
+                              textAlign: pw.TextAlign.center
+                            ),
+                          ],
+                        );
+                      }),
+                    ],
+                  ),
+                  
+                  // Add spacer to push approval section to the bottom
+                  pw.Spacer(),
+                  
+                  // Only show approval and certification on the last page
+                  if (isLastPage) ...[
+                    // Approval section with QR code
+                    pw.Center(
+                      child: pw.Column(
+                        children: [
+                          pw.Text('Approved', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                          pw.SizedBox(height: 10),
+                          qrImage != null
+                            ? pw.Container(
+                                width: 100,
+                                height: 100,
+                                child: pw.Image(qrImage),
+                              )
+                            : pw.Container(
+                                width: 100,
+                                height: 100,
+                                child: pw.Center(
+                                  child: pw.Text('QR CODE'),
+                                ),
+                              ),
+                        ],
+                      ),
+                    ),
+                    
+                    pw.SizedBox(height: 20),
+                    
+                    // Certification note
+                    pw.Center(
+                      child: pw.Text(
+                        'TUN is ISO 9001:2015 Certified.',
+                        style: pw.TextStyle(
+                          fontStyle: pw.FontStyle.italic,
+                          color: PdfColors.grey,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              );
+            },
+          ),
+        );
+      }
+      
+      await Printing.layoutPdf(
+        onLayout: (PdfPageFormat format) async => pdf.save(),
+      );
+    } catch (e) {
+      print('Error printing multiple sessions: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error printing: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  // Helper method to create PDF table cells
+  pw.Widget _pdfTableCell(String text, {bool isHeader = false, bool isAbsent = false, pw.TextAlign textAlign = pw.TextAlign.left}) {
+    return pw.Container(
+      padding: pw.EdgeInsets.all(8),
+      child: pw.Text(
+        text,
+        textAlign: isHeader ? pw.TextAlign.center : textAlign,
+        style: pw.TextStyle(
+          fontWeight: isHeader ? pw.FontWeight.bold : null,
+          color: isAbsent ? PdfColors.red : null,
+          fontStyle: isAbsent ? pw.FontStyle.italic : null,
+        ),
+      ),
+    );
+  }
+
+  int _getWeekOfMonth(DateTime date) {
+    // Clone the date to avoid modifying the original
+    final firstDayOfMonth = DateTime(date.year, date.month, 1);
+    
+    // Calculate days from start of month, accounting for the day of week
+    final int dayOffset = date.day + firstDayOfMonth.weekday - 1;
+    
+    // Integer division to get the week number (1-based)
+    return ((dayOffset - 1) ~/ 7) + 1;
+  }
+}
+
+class HistoryPage extends StatefulWidget {
+  @override
+  _HistoryPageState createState() => _HistoryPageState();
+}
+
+class _HistoryPageState extends State<HistoryPage> {
+  List<Map<String, dynamic>> _sessions = [];
+  bool _isLoading = true;
+  DateTime? _selectedDate;
+  bool _filterWeek = false;
+  int _selectedWeek = 0; // 0=none, 1-4 = week of month
+  int _selectedMonth = 0; // 0=current, -1/-2=previous, 1/2=next
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAttendanceHistory();
+  }
+
+  Future<void> _loadAttendanceHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      
+      // First, get the lecturer history records which contain all sessions
+      final lecturerHistory = prefs.getStringList('lecturer_attendance_history') ?? [];
+      
+      // Create a map to track unique sessions and their attendee counts
+      Map<String, Map<String, dynamic>> sessionMap = {};
+      
+      // Process all lecturer history records
+      for (String record in lecturerHistory) {
+        final data = json.decode(record);
+        final String sessionId = data['sessionId'].toString();
+        
+        // Get or create session entry
+        if (!sessionMap.containsKey(sessionId)) {
+          // Try to get the full session data
+        final sessionData = prefs.getString('session_$sessionId');
+          Map<String, dynamic> sessionInfo;
+          
+        if (sessionData != null) {
+            // Use full session data if available
+            sessionInfo = json.decode(sessionData);
+          } else {
+            // Create basic session info from the record
+            sessionInfo = {
+              'sessionId': sessionId,
+              'unitCode': data['unitCode'],
+              'unitName': data['unitName'],
+              'timestamp': sessionId,
+              'generatedAt': int.parse(sessionId),
+              'attendees': [],
+              'attendeeCount': 0,
+              'selectedStudents': [], // Add array for selected students who should attend
+            };
+            
+            // Add other available fields
+            if (data.containsKey('startTime')) sessionInfo['startTime'] = data['startTime'];
+            if (data.containsKey('endTime')) sessionInfo['endTime'] = data['endTime'];
+            if (data.containsKey('course')) sessionInfo['course'] = data['course'];
+            if (data.containsKey('year')) sessionInfo['year'] = data['year'];
+            if (data.containsKey('semester')) sessionInfo['semester'] = data['semester'];
+            if (data.containsKey('department')) sessionInfo['department'] = data['department'];
+            
+            // If student info is available, try to extract department and course
+            if (data.containsKey('student')) {
+              final student = data['student'];
+              if (student is Map) {
+                if (!sessionInfo.containsKey('department') || sessionInfo['department'] == null)
+                  sessionInfo['department'] = student['department'];
+                if (!sessionInfo.containsKey('course') || sessionInfo['course'] == null)
+                  sessionInfo['course'] = student['course'];
+                if (!sessionInfo.containsKey('year') || sessionInfo['year'] == null)
+                  sessionInfo['year'] = student['year'];
+              }
+            }
+            
+            // Retrieve lecturer details from SharedPreferences
+            final lecturerName = prefs.getString('lecturer_name') ?? 'Unknown';
+            final lecturerEmail = prefs.getString('lecturer_email') ?? 'Unknown';
+            final department = prefs.getString('lecturer_department') ?? 'Unknown';
+            final occupation = prefs.getString('lecturer_occupation') ?? 'Unknown';
+            final employmentType = prefs.getString('lecturer_employment_type') ?? 'Unknown';
+            final gender = prefs.getString('lecturer_gender') ?? 'Unknown';
+            
+            // Add lecturer details to session info
+            sessionInfo['lecturerName'] = lecturerName;
+            sessionInfo['lecturerEmail'] = lecturerEmail;
+            sessionInfo['department'] = department;
+            sessionInfo['occupation'] = occupation;
+            sessionInfo['employmentType'] = employmentType;
+            sessionInfo['gender'] = gender;
+          }
+          
+          // Initialize attendees list if not present
+          if (!sessionInfo.containsKey('attendees')) {
+            sessionInfo['attendees'] = [];
+          }
+          
+          sessionMap[sessionId] = sessionInfo;
+        }
+        
+        // Add student to attendees if not already present
+        if (data.containsKey('student')) {
+          String studentEmail = data['student']['email'];
+          bool studentExists = false;
+          
+          List<dynamic> attendees = sessionMap[sessionId]!['attendees'];
+          for (var attendee in attendees) {
+            if (attendee is Map && attendee['studentEmail'] == studentEmail) {
+              studentExists = true;
+              break;
+            } else if (attendee is String && attendee == studentEmail) {
+              studentExists = true;
+              break;
+            }
+          }
+          
+          if (!studentExists) {
+            // Add student to attendees
+            if (attendees is List<String>) {
+              attendees.add(studentEmail);
+            } else {
+              attendees.add({
+                'studentEmail': studentEmail,
+                'studentName': data['student']['name'],
+                'timestamp': data['attendanceTime']
+              });
+            }
+            sessionMap[sessionId]!['attendees'] = attendees;
+          }
+          
+          // Update attendee count
+          sessionMap[sessionId]!['attendeeCount'] = attendees.length;
+        }
+
+        // Track selected students for this session
+        if (data.containsKey('selectedStudents')) {
+          sessionMap[sessionId]!['selectedStudents'] = data['selectedStudents'];
+        }
+      }
+
+      // Look for QR code student distribution data in session-specific keys
+      final allKeys = prefs.getKeys();
+      for (String key in allKeys) {
+        if (key.startsWith('session_qr_students_')) {
+          final sessionId = key.substring('session_qr_students_'.length);
+            if (sessionMap.containsKey(sessionId)) {
+            final studentsJson = prefs.getString(key);
+            if (studentsJson != null) {
+              try {
+                final studentsList = json.decode(studentsJson) as List<dynamic>;
+                sessionMap[sessionId]!['selectedStudents'] = studentsList;
+              } catch (e) {
+                print('Error decoding students for session $sessionId: $e');
+              }
+            }
+          }
+        } else if (key.startsWith('session_') && key.contains('_students')) {
+          // This is likely "session_{sessionId}_students" format from create_page.dart
+          final sessionId = key.substring('session_'.length, key.indexOf('_students'));
+            if (sessionMap.containsKey(sessionId)) {
+            final studentEmails = prefs.getStringList(key) ?? [];
+            if (studentEmails.isNotEmpty) {
+              List<Map<String, dynamic>> selectedStudents = [];
+              
+              // Convert email list to full student objects
+              for (String email in studentEmails) {
+                Map<String, dynamic> studentData = {'email': email};
+                
+                // Try to get the full student record
+                final userData = prefs.getString(email);
+                if (userData != null) {
+                  try {
+                    Map<String, dynamic> fullData = json.decode(userData);
+                    studentData['name'] = fullData['name'] ?? email.split('@')[0];
+                    studentData['department'] = fullData['department'];
+                    studentData['course'] = fullData['course'];
+                    studentData['year'] = fullData['year'];
+                    studentData['semester'] = fullData['semester'];
+                  } catch (e) {
+                    print('Error parsing user data for $email: $e');
+                    studentData['name'] = email.split('@')[0];
+                  }
+                } else {
+                  studentData['name'] = email.split('@')[0];
+                }
+                
+                selectedStudents.add(studentData);
+              }
+              
+              sessionMap[sessionId]!['selectedStudents'] = selectedStudents;
+            }
+          }
+        }
+      }
+      
+      // Process each session to include absent students
+      for (String sessionId in sessionMap.keys) {
+        final session = sessionMap[sessionId]!;
+        
+        // Get the list of students who should have attended
+        final selectedStudents = session['selectedStudents'] as List<dynamic>? ?? [];
+        final List<dynamic> attendees = session['attendees'] as List<dynamic>;
+        
+        // Create a map of emails to attendee details
+        final Map<String, dynamic> attendeeMap = {};
+        for (var attendee in attendees) {
+          if (attendee is Map) {
+            final email = attendee['studentEmail'] ?? attendee['email'];
+            if (email != null) {
+              attendeeMap[email] = attendee;
+            }
+          } else if (attendee is String) {
+            attendeeMap[attendee] = {'email': attendee};
+          }
+        }
+        
+        // Create complete attendee details that include absent students
+        final List<dynamic> attendeeDetails = [];
+        
+        // First, add students who attended
+        for (var attendee in attendees) {
+          if (attendee is Map) {
+              attendeeDetails.add({
+              'email': attendee['studentEmail'] ?? attendee['email'],
+              'details': attendee
+            });
+          } else if (attendee is String) {
+            attendeeDetails.add({
+              'email': attendee,
+              'details': {'name': 'Unknown', 'email': attendee}
+            });
+          }
+        }
+        
+        // Then add students who didn't attend
+        for (var student in selectedStudents) {
+          String email = '';
+          String name = 'Unknown';
+          Map<String, dynamic> studentDetails = {};
+          
+          if (student is Map) {
+            email = student['email'] ?? '';
+            name = student['name'] ?? 'Unknown';
+            studentDetails = Map<String, dynamic>.from(student);
+          } else if (student is String) {
+            email = student;
+            studentDetails = {'email': email};
+            
+            // Try to get full student details from preferences
+            final userData = prefs.getString(email);
+            if (userData != null) {
+              try {
+                Map<String, dynamic> parsedData = json.decode(userData);
+                if (parsedData.containsKey('name')) {
+                  name = parsedData['name'];
+                  studentDetails = Map<String, dynamic>.from(parsedData);
+                }
+              } catch (e) {
+                print('Error parsing user data for absent student $email: $e');
+              }
+            }
+          }
+          
+          if (email.isNotEmpty && !attendeeMap.containsKey(email)) {
+            // Enhanced name retrieval - don't use generic "Student" placeholder
+            String displayName = name;
+            if (name == 'Unknown' || name == 'Student') {
+              // If we couldn't get a proper name, use the email username
+              displayName = email.contains('@') ? email.split('@').first : email;
+            }
+            
+            // Student didn't attend, add them as absent
+            attendeeDetails.add({
+              'email': email,
+              'details': {
+                'name': displayName,
+                'email': email,
+                'studentEmail': email,
+                'studentName': displayName,
+                'timestamp': null, // Set timestamp as null for absent students
+                'status': 'absent',
+                ...studentDetails
+              }
+            });
+          }
+        }
+        
+        session['attendeeDetails'] = attendeeDetails;
+        
+        // Update the total count to reflect all expected students
+        if (selectedStudents.isNotEmpty) {
+          session['totalExpected'] = selectedStudents.length;
+          session['absentCount'] = selectedStudents.length - (session['attendeeCount'] ?? 0);
+        }
+      }
+      
+      // Convert session map to list and sort by date (newest first)
+      final List<Map<String, dynamic>> sessions = sessionMap.values.toList();
+      sessions.sort((a, b) {
+        final aTimestamp = a['timestamp'] is int ? a['timestamp'] : int.tryParse(a['timestamp'].toString()) ?? 0;
+        final bTimestamp = b['timestamp'] is int ? b['timestamp'] : int.tryParse(b['timestamp'].toString()) ?? 0;
+        return bTimestamp.compareTo(aTimestamp);
+      });
+
+      setState(() {
+        _sessions = sessions;
+        _isLoading = false;
+      });
+      
+      print('Loaded ${sessions.length} unique sessions with attendance records');
+      
+    } catch (e) {
+      print('Error loading attendance history: $e');
+      setState(() => _isLoading = false);
+    }
+  }
+
+  // Clear all attendance logs
+  Future<void> _clearAttendanceLogs() async {
+    try {
+      showDialog(
+        context: context,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text('Clear Attendance Logs'),
+            content: Text('Are you sure you want to clear all attendance logs? This cannot be undone.'),
+            actions: [
+              TextButton(
+                child: Text('Cancel'),
+                onPressed: () {
+                  Navigator.of(context).pop();
+                },
+              ),
+              TextButton(
+                child: Text('Clear', style: TextStyle(color: Colors.red)),
+                onPressed: () async {
+                  Navigator.of(context).pop();
+                  setState(() {
+                    _sessions = [];
+                    _isLoading = false;
+                    _selectedDate = null;
+                    _selectedWeek = 0;
+                    _selectedMonth = 0;
+                  });
+                  
+                  final prefs = await SharedPreferences.getInstance();
+                  
+                  // Get all keys in SharedPreferences
+                  final keys = prefs.getKeys();
+                  
+                  // Remove all attendance-related records
+                  for (String key in keys) {
+                    if (key.startsWith('session_') || 
+                        key.startsWith('lecture_history_') ||
+                        key.startsWith('class_attendance_') ||
+                        key == 'lecturer_attendance_history' ||
+                        key == 'attendance_data_consolidated' ||
+                        key == 'detailed_attendance_history') {
+                      await prefs.remove(key);
+                    }
+                  }
+                  
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('All attendance logs cleared'),
+                      backgroundColor: Colors.green,
+                    ),
+                  );
+                },
+              ),
+            ],
+          );
+        },
+      );
+    } catch (e) {
+      print('Error clearing attendance logs: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error clearing logs: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      setState(() => _isLoading = false);
+    }
+  }
+
+  // Get week of month (1-4)
+  int _getWeekOfMonth(DateTime date) {
+    // Clone the date to avoid modifying the original
+    final firstDayOfMonth = DateTime(date.year, date.month, 1);
+    
+    // Calculate days from start of month, accounting for the day of week
+    final int dayOffset = date.day + firstDayOfMonth.weekday - 1;
+    
+    // Integer division to get the week number (1-based)
+    return ((dayOffset - 1) ~/ 7) + 1;
+  }
+
+  // Get start and end date for a specific week of a month
+  DateTimeRange _getWeekDateRange() {
+    // Base month: current, previous, or next
+    DateTime now = DateTime.now();
+    DateTime baseMonth;
+    
+    switch (_selectedMonth) {
+      case -2: // 2 months ago
+        baseMonth = DateTime(now.year, now.month - 2, 1);
+        break;
+      case -1: // Previous month
+        baseMonth = DateTime(now.year, now.month - 1, 1);
+        break;
+      case 1: // Next month
+        baseMonth = DateTime(now.year, now.month + 1, 1);
+        break;
+      case 2: // 2 months ahead
+        baseMonth = DateTime(now.year, now.month + 2, 1);
+        break;
+      default: // Current month
+        baseMonth = DateTime(now.year, now.month, 1);
+    }
+    
+    // First day of the month
+    final firstDay = DateTime(baseMonth.year, baseMonth.month, 1);
+    
+    // Day of week for the first day (0=Monday in our calculation)
+    final firstDayWeekday = firstDay.weekday;
+    
+    // Calculate the first day of the selected week
+    int daysToAdd = (_selectedWeek - 1) * 7;
+    if (firstDayWeekday > 1) {
+      // Adjust to start on the first full week
+      daysToAdd += (8 - firstDayWeekday);
+    }
+    
+    final startDate = DateTime(baseMonth.year, baseMonth.month, 1 + daysToAdd);
+    final endDate = DateTime(baseMonth.year, baseMonth.month, 1 + daysToAdd + 6);
+    
+    return DateTimeRange(start: startDate, end: endDate);
+  }
+
+  // Helper to get month name
+  String _getMonthName(int monthOffset) {
+    final DateTime now = DateTime.now();
+    final DateTime targetMonth = DateTime(now.year, now.month + monthOffset, 1);
+    return DateFormat('MMMM').format(targetMonth);
+  }
+
+  // Filter sessions by selected date or week
+  List<Map<String, dynamic>> _getFilteredSessions() {
+    if (_selectedDate == null && _selectedWeek == 0) {
+      return _groupAndSortSessions(_sessions);
+    }
+    
+    final filtered = _sessions.where((session) {
+      // Extract date from session
+      DateTime? sessionDate;
+      
+      if (session.containsKey('date')) {
+        try {
+          sessionDate = DateTime.parse(session['date']);
+        } catch (e) {
+          // If parse fails, try to extract date parts
+          final parts = session['date'].toString().split('-');
+          if (parts.length == 3) {
+            try {
+              sessionDate = DateTime(
+                int.parse(parts[0]), 
+                int.parse(parts[1]), 
+                int.parse(parts[2])
+              );
+            } catch (e) {
+              print('Error parsing date parts: $e');
+            }
+          }
+        }
+      } else if (session.containsKey('timestamp')) {
+        final timestamp = session['timestamp'];
+        if (timestamp is int) {
+          sessionDate = DateTime.fromMillisecondsSinceEpoch(timestamp);
+        } else if (timestamp is String) {
+          if (int.tryParse(timestamp) != null) {
+            sessionDate = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+          } else {
+            try {
+              sessionDate = DateTime.parse(timestamp);
+            } catch (e) {
+              print('Error parsing timestamp: $e');
+            }
+          }
+        }
+      }
+
+      if (sessionDate == null) {
+        return false;
+      }
+      
+      if (_selectedWeek > 0) {
+        // Filter by selected week of month
+        final DateTimeRange weekRange = _getWeekDateRange();
+        
+        // Check if session date is within the selected week
+        return sessionDate.isAfter(weekRange.start.subtract(Duration(days: 1))) && 
+               sessionDate.isBefore(weekRange.end.add(Duration(days: 1)));
+      } else {
+        // Check if session date matches selected date
+        return sessionDate.year == _selectedDate!.year && 
+               sessionDate.month == _selectedDate!.month && 
+               sessionDate.day == _selectedDate!.day;
+      }
+    }).toList();
+    
+    return _groupAndSortSessions(filtered);
+  }
+
+  // Group sessions by date (day) and sort
+  List<Map<String, dynamic>> _groupAndSortSessions(List<Map<String, dynamic>> sessions) {
+    // Create a map to group sessions by date
+    Map<String, List<Map<String, dynamic>>> groupedByDate = {};
+    
+    // Track unique sessions to prevent repetition - using simpler key without sessionId
+    Map<String, Map<String, dynamic>> uniqueSessionMap = {};
+    
+    for (var session in sessions) {
+      // Get date from session
+      String dateKey = "Unknown";
+      
+      if (session.containsKey('date')) {
+        dateKey = session['date'].toString();
+      } else if (session.containsKey('timestamp')) {
+        try {
+          final timestamp = session['timestamp'];
+          DateTime date;
+          if (timestamp is int) {
+            date = DateTime.fromMillisecondsSinceEpoch(timestamp);
+          } else if (timestamp is String) {
+            if (int.tryParse(timestamp) != null) {
+              date = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+            } else {
+              date = DateTime.parse(timestamp);
+            }
+          } else {
+            date = DateTime.now();
+          }
+          dateKey = DateFormat('yyyy-MM-dd').format(date);
+        } catch (e) {
+          print('Error formatting date: $e');
+          dateKey = "Unknown";
+        }
+      }
+      
+      // Add week and day information to each session
+      if (session.containsKey('date')) {
+        try {
+          final date = DateTime.parse(session['date']);
+          final weekOfMonth = _getWeekOfMonth(date);
+          final monthName = DateFormat('MMMM').format(date);
+          final dayOfWeek = DateFormat('EEEE').format(date);
+          
+          session['weekInfo'] = 'Week $weekOfMonth of $monthName';
+          session['dayInfo'] = '$dayOfWeek, ${date.day}';
+        } catch (e) {
+          print('Error calculating week info: $e');
+        }
+      }
+      
+      // Create unique identifier that doesn't include sessionId
+      String unitCode = session['unitCode'] ?? 'Unknown';
+      String timeIdentifier = '';
+      if (session.containsKey('startTime') && session.containsKey('endTime')) {
+        timeIdentifier = '${session['startTime']}-${session['endTime']}';
+      }
+      
+      // Create a unique key that combines date + unit + time (without sessionId)
+      String uniqueSessionKey = '$dateKey::$unitCode::$timeIdentifier';
+      
+      // Check if we've seen this session before
+      if (uniqueSessionMap.containsKey(uniqueSessionKey)) {
+        // This is a duplicate session - merge attendee data if needed
+        Map<String, dynamic> existingSession = uniqueSessionMap[uniqueSessionKey]!;
+        
+        // Merge attendee details if both sessions have them
+        if (session.containsKey('attendeeDetails') && existingSession.containsKey('attendeeDetails')) {
+          List<dynamic> newAttendeeDetails = session['attendeeDetails'];
+          List<dynamic> existingAttendeeDetails = existingSession['attendeeDetails'];
+          
+          // Create a map of existing attendees by email to avoid duplicates
+          Map<String, dynamic> attendeeByEmail = {};
+          for (var attendee in existingAttendeeDetails) {
+            final email = attendee['email'];
+            if (email != null && email.isNotEmpty) {
+              attendeeByEmail[email] = attendee;
+            }
+          }
+          
+          // Add any new attendees not already in the existing session
+          for (var attendee in newAttendeeDetails) {
+            final email = attendee['email'];
+            if (email != null && email.isNotEmpty && !attendeeByEmail.containsKey(email)) {
+              existingAttendeeDetails.add(attendee);
+              attendeeByEmail[email] = attendee;
+            }
+          }
+          
+          // Update existing session with merged attendee details
+          existingSession['attendeeDetails'] = existingAttendeeDetails;
+        }
+      } else {
+        // This is a new unique session
+        uniqueSessionMap[uniqueSessionKey] = session;
+        
+        // Add session to date group
+        if (!groupedByDate.containsKey(dateKey)) {
+          groupedByDate[dateKey] = [];
+        }
+        groupedByDate[dateKey]!.add(session);
+      }
+    }
+    
+    // Sort dates in reverse chronological order (newest first)
+    List<String> sortedDates = groupedByDate.keys.toList();
+    sortedDates.sort((a, b) {
+      try {
+        DateTime dateA = DateTime.parse(a);
+        DateTime dateB = DateTime.parse(b);
+        return dateB.compareTo(dateA); // Reverse order (newest first)
+        } catch (e) {
+        return a.compareTo(b); // Fallback to string comparison
+      }
+    });
+    
+    // Now update grouped dates based on our uniqueSessionMap
+    for (var dateKey in groupedByDate.keys) {
+      // Filter the sessions for this date to only include unique ones
+      List<Map<String, dynamic>> uniqueSessions = [];
+      for (var session in groupedByDate[dateKey]!) {
+        String unitCode = session['unitCode'] ?? 'Unknown';
+        String timeIdentifier = '';
+        if (session.containsKey('startTime') && session.containsKey('endTime')) {
+          timeIdentifier = '${session['startTime']}-${session['endTime']}';
+        }
+        String uniqueSessionKey = '$dateKey::$unitCode::$timeIdentifier';
+        
+        // Only add this session if it matches our unique map for this key
+        if (uniqueSessionMap[uniqueSessionKey] == session) {
+          uniqueSessions.add(session);
+        }
+      }
+      
+      // Sort by unit code within each date
+      uniqueSessions.sort((a, b) {
+        String unitCodeA = a['unitCode'] ?? 'Unknown';
+        String unitCodeB = b['unitCode'] ?? 'Unknown';
+        return unitCodeA.compareTo(unitCodeB);
+      });
+      
+      // Replace the sessions for this date with the deduplicated set
+      groupedByDate[dateKey] = uniqueSessions;
+    }
+    
+    // Flatten the grouped list in date order
+    List<Map<String, dynamic>> result = [];
+    for (String dateKey in sortedDates) {
+      result.addAll(groupedByDate[dateKey]!);
+    }
+    
+    return result;
+  }
+
+  String _formatDateTime(dynamic timestamp) {
+    DateTime date;
+    
+    if (timestamp is int) {
+      date = DateTime.fromMillisecondsSinceEpoch(timestamp);
+    } else if (timestamp is String) {
+      // Try to parse as int first
+      int? epochTime = int.tryParse(timestamp);
+      if (epochTime != null) {
+        date = DateTime.fromMillisecondsSinceEpoch(epochTime);
+      } else {
+        // Try to parse as ISO date
+        try {
+          date = DateTime.parse(timestamp);
+        } catch (e) {
+          return timestamp; // Return as is if parsing fails
+        }
+      }
+    } else {
+      return 'Unknown date';
+    }
+    
+    return '${date.day}/${date.month}/${date.year} ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filteredSessions = _isLoading ? [] : _getFilteredSessions();
+    
+    // Group sessions by unit code for display
+    Map<String, List<Map<String, dynamic>>> groupedByUnitCode = {};
+    
+    // Track unique sessions to prevent repetition
+    Map<String, Map<String, dynamic>> uniqueSessionMap = {};
+    
+    for (var session in filteredSessions) {
+      // ... existing code ...
+    }
+    
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Attendance History'),
+        backgroundColor: Colors.blue,
+        actions: [
+          // Filter button
+          IconButton(
+            icon: Icon(Icons.filter_list),
+            tooltip: 'Filter History',
+            onPressed: () {
+              _showFilterOptions(context);
+            },
+          ),
+          // Analysis button
+          IconButton(
+            icon: Icon(Icons.analytics),
+            tooltip: 'Visual Analysis',
+            onPressed: _sessions.isNotEmpty ? () {
+              final filteredSessions = _getFilteredSessions();
+              // Select the most recent session for analysis
+              final mostRecentSession = filteredSessions.isNotEmpty ? 
+                filteredSessions.first : _sessions.first;
+              
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => AnalysisPage(
+                    sessionData: mostRecentSession,
+                    relatedSessions: filteredSessions.isNotEmpty ? 
+                      filteredSessions.cast<Map<String, dynamic>>() : 
+                      _sessions.cast<Map<String, dynamic>>(),
+                  ),
+                ),
+              );
+            } : null,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          // Filter bar at the top
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              border: Border(
+                bottom: BorderSide(
+                  color: Colors.grey.shade300,
+                  width: 1,
+                ),
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.grey.withOpacity(0.1),
+                  blurRadius: 4,
+                  offset: Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 8.0),
+              child: Row(
+                children: [
+                  // Date selector
+                  Expanded(
+                    child: Container(
+                      height: 44,
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey.shade300),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: InkWell(
+                        onTap: () async {
+                          final DateTime? picked = await showDatePicker(
+                            context: context,
+                            initialDate: _selectedDate ?? DateTime.now(),
+                            firstDate: DateTime(2020),
+                            lastDate: DateTime(2030),
+                          );
+                          if (picked != null && picked != _selectedDate) {
+                            setState(() {
+                              _selectedDate = picked;
+                              _selectedWeek = 0; // Clear week selection
+                            });
+                          }
+                        },
+                        child: Row(
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                              child: Icon(Icons.calendar_today, color: Colors.grey.shade700),
+                            ),
+                            Expanded(
+                              child: Text(
+                                _selectedDate != null 
+                                    ? DateFormat('d MMM yyyy').format(_selectedDate!)
+                                    : 'Select date',
+                                style: TextStyle(color: Colors.grey.shade700),
+                              ),
+                            ),
+                            if (_selectedDate != null)
+                              IconButton(
+                                icon: Icon(Icons.clear, size: 18, color: Colors.grey.shade700),
+                                onPressed: () {
+                                  setState(() {
+                                    _selectedDate = null;
+                                  });
+                                },
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  // Week selection dropdown
+                  PopupMenuButton<Map<String, int>>(
+                    tooltip: 'Select week',
+                    child: Container(
+                      height: 44,
+                      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey.shade300),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.date_range, color: Colors.grey.shade700),
+                          SizedBox(width: 4),
+                          Text(
+                            _selectedWeek > 0 
+                                ? 'Week $_selectedWeek of ${_getMonthName(_selectedMonth)}' 
+                                : 'Select week',
+                            style: TextStyle(color: Colors.grey.shade700),
+                          ),
+                          if (_selectedWeek > 0)
+                            IconButton(
+                              icon: Icon(Icons.clear, size: 18, color: Colors.grey.shade700),
+                              padding: EdgeInsets.zero,
+                              constraints: BoxConstraints(),
+                              onPressed: () {
+                                setState(() {
+                                  _selectedWeek = 0;
+                                  _selectedMonth = 0;
+                                });
+                              },
+                          ),
+                        ],
+                      ),
+                    ),
+                    onSelected: (Map<String, int> value) {
+                      setState(() {
+                        _selectedWeek = value['week']!;
+                        _selectedMonth = value['month']!;
+                        _selectedDate = null; // Clear date selection
+                      });
+                    },
+                    itemBuilder: (context) => _buildWeekSelectionItems(),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          
+          // Spinner or no data message
+          if (_isLoading)
+                  Expanded(
+              child: Center(
+                child: CircularProgressIndicator(),
+              ),
+            )
+          else if (_sessions.isEmpty)
+          Expanded(
+              child: Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.event_busy,
+                              size: 64,
+                              color: Colors.grey.shade400,
+                            ),
+                            SizedBox(height: 16),
+                    Text(
+                      'No attendance records found',
+                      style: TextStyle(
+                        fontSize: 18,
+                        color: Colors.grey.shade700,
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                            Text(
+                              _selectedDate != null || _selectedWeek > 0
+                          ? 'Try adjusting your date filter'
+                          : 'Start taking attendance to see records here',
+                      style: TextStyle(
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else
+            // List of sessions grouped by unit code
+            Expanded(
+              child: ListView.builder(
+                        itemCount: _sessions.length,
+                        itemBuilder: (context, index) {
+                          final session = _sessions[index];
+                          
+                          // Format the date for display
+                          String displayDate = '';
+                          if (session.containsKey('date')) {
+                            try {
+                              final date = DateTime.parse(session['date']);
+                              displayDate = DateFormat('EEEE, MMMM d, yyyy').format(date);
+                            } catch (e) {
+                              displayDate = session['date'].toString();
+                            }
+                          } else if (session.containsKey('timestamp')) {
+                            try {
+                              final timestamp = session['timestamp'];
+                              DateTime date;
+                              if (timestamp is int) {
+                                date = DateTime.fromMillisecondsSinceEpoch(timestamp);
+                              } else if (timestamp is String) {
+                                if (int.tryParse(timestamp) != null) {
+                                  date = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
+                                } else {
+                                  date = DateTime.parse(timestamp);
+                                }
+                              } else {
+                                date = DateTime.now();
+                              }
+                              displayDate = DateFormat('EEEE, MMMM d, yyyy').format(date);
+                            } catch (e) {
+                              displayDate = 'Unknown date';
+                            }
+                          }
+                          
+                          final attendeeDetails = session['attendeeDetails'] as List<dynamic>? ?? [];
+                          
+                          // Extract time if available
+                          String timeStr = '';
+                          if (session.containsKey('startTime') && session.containsKey('endTime')) {
+                            timeStr = '${session['startTime']} - ${session['endTime']}';
+                          }
+                          
+                          // Calculate present/absent counts
+                          int presentCount = 0;
+                          int absentCount = 0;
+                          
+                          for (var attendee in attendeeDetails) {
+                            final details = attendee['details'];
+                            bool isAbsent = false;
+                            
+                            if (details is Map) {
+                              if (details.containsKey('status') && details['status'] == 'absent') {
+                                isAbsent = true;
+                              } else if (details.containsKey('timestamp') && details['timestamp'] == null) {
+                                isAbsent = true;
+                              }
+                            }
+                            
+                            if (isAbsent) {
+                              absentCount++;
+                            } else {
+                              presentCount++;
+                            }
+                          }
+                          
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+                            child: Card(
+                              elevation: 2,
+                              child: ExpansionTile(
+                                title: Text(
+                                  displayDate,
+                                  style: TextStyle(fontWeight: FontWeight.bold),
+                                ),
+                                subtitle: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                                    if (timeStr.isNotEmpty) 
+                                                      Text('Time: $timeStr'),
+                                    Row(
+                                      children: [
+                                        Text(
+                                                          'Present: $presentCount',
+                                          style: TextStyle(
+                                                          fontWeight: presentCount > 0 ? FontWeight.bold : FontWeight.normal,
+                                                          color: presentCount > 0 ? Colors.green.shade800 : null,
+                                                        ),
+                                                      ),
+                                                      Padding(
+                                                        padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                                                        child: Text('|'),
+                                                      ),
+                                                      Text(
+                                                        'Absent: $absentCount',
+                                                        style: TextStyle(
+                                                          fontWeight: absentCount > 0 ? FontWeight.bold : FontWeight.normal,
+                                                          color: absentCount > 0 ? Colors.red.shade800 : null,
+                                                        ),
+                                                      ),
+                                                      if (presentCount > 0)
+                                        Padding(
+                                          padding: const EdgeInsets.only(left: 8.0),
+                                          child: Icon(
+                                            Icons.group,
+                                            size: 16,
+                                            color: Colors.green.shade800,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                              children: [
+                                Padding(
+                                  padding: EdgeInsets.all(16),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      if (session.containsKey('department'))
+                                      Text(
+                                        'Department: ${session['department']}',
+                                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.blue.shade800),
+                                      ),
+                                      if (session.containsKey('course'))
+                                      Text(
+                                        'Course: ${session['course']}',
+                                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.blue.shade800),
+                                      ),
+                                      // Always display year and semester
+                                      Text(
+                                        'Year: ${session['year'] ?? "3"}, Semester: ${session['semester'] ?? "2"}',
+                                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.blue.shade700),
+                                      ),
+                                      SizedBox(height: 8),
+                                      Row(
+                                        mainAxisAlignment: MainAxisAlignment.end,
+                                        children: [
+                                          ElevatedButton.icon(
+                                            icon: Icon(Icons.print),
+                                            label: Text('Print Attendance'),
+                                            style: ElevatedButton.styleFrom(
+                                              backgroundColor: Colors.blue,
+                                              foregroundColor: Colors.white,
+                                            ),
+                                            onPressed: () {
+                                              // Get all sessions for this unit to provide context
+                                              final relatedSessions = _sessions.where((s) => 
+                                                s['unitCode'] == session['unitCode']).toList().cast<Map<String, dynamic>>();
+                                              
+                                              // Make sure we have course information in the session data
+                                              if (!session.containsKey('department') || session['department'] == null || session['department'].isEmpty) {
+                                                // Try to get department from the first attendee
+                                                if (_sessions.isNotEmpty) {
+                                                  final firstAttendee = _sessions.first;
+                                                  if (firstAttendee is Map && firstAttendee.containsKey('department')) {
+                                                    session['department'] = firstAttendee['department'];
+                                                  }
+                                                }
+                                              }
+                                              if (!session.containsKey('course') || session['course'] == null || session['course'].isEmpty) {
+                                                // Try to get course from the first attendee
+                                                if (_sessions.isNotEmpty) {
+                                                  final firstAttendee = _sessions.first;
+                                                  if (firstAttendee is Map && firstAttendee.containsKey('course')) {
+                                                    session['course'] = firstAttendee['course'];
+                                                  }
+                                                }
+                                              }
+                                              
+                                              Navigator.push(
+                                                context,
+                                                MaterialPageRoute(
+                                                  builder: (context) => PrintAttendancePage(
+                                                    sessionData: session,
+                                                    relatedSessions: relatedSessions,
+                                                  ),
+                                                ),
+                                              );
+                                            },
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ],
+                  );
+                },
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+    );
+  }
+  
+  List<PopupMenuEntry<Map<String, int>>> _buildWeekSelectionItems() {
+    List<PopupMenuEntry<Map<String, int>>> items = [];
+    
+    // Month sections
+    for (int month = -2; month <= 2; month++) {
+      String monthName = _getMonthName(month);
+      String monthLabel;
+      
+      if (month == 0) {
+        monthLabel = 'Current Month ($monthName)';
+      } else if (month == -1) {
+        monthLabel = 'Previous Month ($monthName)';
+      } else if (month == -2) {
+        monthLabel = '2 Months Ago ($monthName)';
+      } else if (month == 1) {
+        monthLabel = 'Next Month ($monthName)';
+                                                      } else {
+        monthLabel = '2 Months Ahead ($monthName)';
+      }
+      
+      // Add month header
+      items.add(
+        PopupMenuItem<Map<String, int>>(
+          enabled: false,
+          child: Text(
+            monthLabel,
+                                                      style: TextStyle(
+              fontWeight: FontWeight.bold,
+              color: Colors.grey.shade800,
+            ),
+          ),
+        ),
+      );
+      
+      // Add weeks for this month
+      for (int week = 1; week <= 4; week++) {
+        items.add(
+          PopupMenuItem<Map<String, int>>(
+            value: {'week': week, 'month': month},
+            child: Text('Week $week'),
+          ),
+        );
+      }
+      
+      // Add divider if not the last month
+      if (month < 2) {
+        items.add(PopupMenuDivider());
+      }
+    }
+    
+    return items;
+  }
+} 
+
+// AnalyzeAttendancePage for analyzing student attendance patterns
+class AnalyzeAttendancePage extends StatefulWidget {
+  final Map<String, dynamic> sessionData;
+  final List<Map<String, dynamic>>? relatedSessions;
+
+  AnalyzeAttendancePage({
+    Key? key, 
+    required this.sessionData, 
+    this.relatedSessions
+  }) : super(key: key);
+
+  @override
+  _AnalyzeAttendancePageState createState() => _AnalyzeAttendancePageState();
+}
+
+class _AnalyzeAttendancePageState extends State<AnalyzeAttendancePage> {
+  bool _isLoading = false;
+  List<Map<String, dynamic>> _attendanceData = [];
+  final int _totalHoursPerSemester = 36; // 3 hours per week × 4 weeks × 3 months
+  final double _attendanceThreshold = 0.7; // 70% attendance requirement
+  
+  // Define attendance categories
+  final String _fullAttendance = "Full Attendance";
+  final String _lowAttendance = "Low Attendance";
+  final String _improvingAttendance = "Improving";
+  final String _averageAttendance = "Average";
+  
+  @override
+  void initState() {
+    super.initState();
+    _analyzeAttendance();
+  }
+  
+  Future<void> _analyzeAttendance() async {
+    setState(() {
+      _isLoading = true;
+    });
+    
+    try {
+      // Gather all sessions for this unit
+      List<Map<String, dynamic>> allSessions = [];
+      if (widget.relatedSessions != null && widget.relatedSessions!.isNotEmpty) {
+        allSessions = List.from(widget.relatedSessions!);
+      } else {
+        allSessions = [widget.sessionData];
+      }
+      
+      // Extract unit information
+      final unitCode = widget.sessionData['unitCode'] ?? 'Unknown';
+      final unitName = widget.sessionData['unitName'] ?? 'Unknown';
+      
+      // Load all attendance records from SharedPreferences
+      final prefs = await SharedPreferences.getInstance();
+      
+      // Get all keys that contain attendance data for this unit
+      final allKeys = prefs.getKeys();
+      List<String> attendanceKeys = [];
+      
+      // Look for session keys related to this unit
+      for (String key in allKeys) {
+        if (key.startsWith('session_') && key.contains(unitCode)) {
+          attendanceKeys.add(key);
+        }
+      }
+      
+      // Get list of all students who have attended this unit
+      Set<String> allStudentEmails = {};
+      
+      // Process each session to get attendees
+      for (String key in attendanceKeys) {
+        final String? sessionData = prefs.getString(key);
+        if (sessionData != null) {
+          final Map<String, dynamic> data = json.decode(sessionData);
+          if (data.containsKey('attendees') && data['attendees'] is List) {
+            for (var attendee in data['attendees']) {
+              if (attendee is Map && attendee.containsKey('studentEmail')) {
+                allStudentEmails.add(attendee['studentEmail']);
+              }
+            }
+          }
+        }
+      }
+      
+      // Calculate attendance for each student
+      List<Map<String, dynamic>> studentAttendance = [];
+      
+      for (String email in allStudentEmails) {
+        int sessionsAttended = 0;
+        String studentName = 'Unknown';
+        List<bool> attendancePattern = [];
+        Map<String, dynamic>? studentDetails;
+        
+        // Check each session for this student's attendance
+        for (var session in allSessions) {
+          if (session.containsKey('attendees') && session['attendees'] is List) {
+            bool attended = false;
+            for (var attendee in session['attendees']) {
+              if (attendee is Map && attendee['studentEmail'] == email) {
+                attended = true;
+                // Get student details if not already retrieved
+                if (studentName == 'Unknown' && attendee.containsKey('studentName')) {
+                  studentName = attendee['studentName'];
+                  studentDetails = Map.from(attendee);
+                }
+                break;
+              }
+            }
+            attendancePattern.add(attended);
+            if (attended) sessionsAttended++;
+          }
+        }
+        
+        // Calculate attendance percentage
+        final totalSessions = allSessions.length > 0 ? allSessions.length : 1;
+        final double attendancePercentage = sessionsAttended / totalSessions;
+        
+        // Calculate hours attended (assuming 3 hours per session)
+        final hoursAttended = sessionsAttended * 3;
+        
+        // Determine if eligible for exam
+        final bool isEligible = attendancePercentage >= _attendanceThreshold;
+        
+        // Determine attendance category
+        String category;
+        if (attendancePercentage >= 0.95) {
+          category = _fullAttendance;
+        } else if (attendancePercentage <= 0.4) {
+          category = _lowAttendance;
+        } else if (_isImproving(attendancePattern)) {
+          category = _improvingAttendance;
+        } else {
+          category = _averageAttendance;
+        }
+        
+        studentAttendance.add({
+          'email': email,
+          'name': studentName,
+          'details': studentDetails,
+          'sessionsAttended': sessionsAttended,
+          'totalSessions': totalSessions,
+          'attendancePercentage': attendancePercentage,
+          'hoursAttended': hoursAttended,
+          'isEligible': isEligible,
+          'category': category,
+          'attendancePattern': attendancePattern,
+        });
+      }
+      
+      // Sort by attendance percentage (descending)
+      studentAttendance.sort((a, b) => 
+        (b['attendancePercentage'] as double).compareTo(a['attendancePercentage'] as double));
+      
+      setState(() {
+        _attendanceData = studentAttendance;
+        _isLoading = false;
+      });
+    } catch (e) {
+      print('Error analyzing attendance: $e');
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+  
+  // Check if attendance is improving over time
+  bool _isImproving(List<bool> pattern) {
+    if (pattern.length < 3) return false;
+    
+    // Check last few sessions against earlier ones
+    int midpoint = pattern.length ~/ 2;
+    int earlyAttendance = 0;
+    int lateAttendance = 0;
+    
+    for (int i = 0; i < midpoint; i++) {
+      if (pattern[i]) earlyAttendance++;
+    }
+    
+    for (int i = midpoint; i < pattern.length; i++) {
+      if (pattern[i]) lateAttendance++;
+    }
+    
+    // Calculate percentage improvement
+    final earlyRate = earlyAttendance / midpoint;
+    final lateRate = lateAttendance / (pattern.length - midpoint);
+    
+    return lateRate > earlyRate && (lateRate - earlyRate) > 0.2; // At least 20% improvement
+  }
+  
+  @override
+  Widget build(BuildContext context) {
+    // Get unit information
+    final unitCode = widget.sessionData['unitCode'] ?? 'Unknown Unit';
+    final unitName = widget.sessionData['unitName'] ?? 'Unknown';
+    
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Attendance Analysis'),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.print),
+            tooltip: 'Print Analysis',
+            onPressed: _generatePDF,
+          ),
+        ],
+      ),
+      body: _isLoading
+        ? Center(child: CircularProgressIndicator())
+        : _attendanceData.isEmpty
+          ? Center(
+              child: Text(
+                'No attendance data available for analysis.',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+            )
+          : SingleChildScrollView(
+              padding: EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Unit information header
+                  Container(
+                    padding: EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blue.shade200)
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Unit: $unitCode - $unitName',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        SizedBox(height: 8),
+                        Text(
+                          'Total Sessions: ${_attendanceData.isNotEmpty ? _attendanceData[0]['totalSessions'] : 0}',
+                          style: TextStyle(fontSize: 16),
+                        ),
+                        Text(
+                          'Total Students: ${_attendanceData.length}',
+                          style: TextStyle(fontSize: 16),
+                        ),
+                        Text(
+                          'Required Attendance: 70% (${(_totalHoursPerSemester * 0.7).round()} hours out of $_totalHoursPerSemester)',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                  ),
+                  
+                  SizedBox(height: 24),
+                  
+                  // Summary statistics
+                  Text(
+                    'Attendance Summary',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  SizedBox(height: 16),
+                  
+                  // Statistics cards
+                  Row(
+                    children: [
+                      _buildStatCard(
+                        'Eligible for Exams',
+                        _attendanceData.where((s) => s['isEligible'] == true).length,
+                        _attendanceData.length,
+                        Colors.green,
+                      ),
+                      SizedBox(width: 16),
+                      _buildStatCard(
+                        'At Risk',
+                        _attendanceData.where((s) => s['isEligible'] == false).length,
+                        _attendanceData.length,
+                        Colors.red,
+                      ),
+                    ],
+                  ),
+                  
+                  SizedBox(height: 16),
+                  
+                  Row(
+                    children: [
+                      _buildStatCard(
+                        'Full Attendance',
+                        _attendanceData.where((s) => s['category'] == _fullAttendance).length,
+                        _attendanceData.length,
+                        Colors.blue,
+                      ),
+                      SizedBox(width: 16),
+                      _buildStatCard(
+                        'Low Attendance',
+                        _attendanceData.where((s) => s['category'] == _lowAttendance).length,
+                        _attendanceData.length,
+                        Colors.orange,
+                      ),
+                    ],
+                  ),
+                  
+                  SizedBox(height: 24),
+                  
+                  // Student list with attendance details
+                  Text(
+                    'Student Attendance Details',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  SizedBox(height: 16),
+                  
+                  // Table header
+                  Container(
+                    padding: EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+                    color: Colors.grey.shade200,
+                    child: Row(
+                      children: [
+                        Expanded(
+                          flex: 3,
+                          child: Text(
+                            'Student',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                        Expanded(
+                          flex: 2,
+                          child: Text(
+                            'Attendance',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                        Expanded(
+                          flex: 2,
+                          child: Text(
+                            'Hours',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                        Expanded(
+                          flex: 2,
+                          child: Text(
+                            'Status',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  
+                  // Student list
+                  ...List.generate(_attendanceData.length, (index) {
+                    final student = _attendanceData[index];
+                    final bool isEligible = student['isEligible'];
+                    final double percentage = student['attendancePercentage'] * 100;
+                    final Color statusColor = isEligible ? Colors.green : Colors.red;
+                    
+                    return Container(
+                      decoration: BoxDecoration(
+                        border: Border(bottom: BorderSide(color: Colors.grey.shade300)),
+                      ),
+                      child: ExpansionTile(
+                        title: Row(
+                          children: [
+                            Expanded(
+                              flex: 3,
+                              child: Text(student['name']),
+                            ),
+                            Expanded(
+                              flex: 2,
+                              child: Text('${percentage.toStringAsFixed(1)}%'),
+                            ),
+                            Expanded(
+                              flex: 2,
+                              child: Text('${student['hoursAttended']} / $_totalHoursPerSemester'),
+                            ),
+                            Expanded(
+                              flex: 2,
+                              child: Text(
+                                isEligible ? 'Eligible' : 'At Risk',
+                                style: TextStyle(
+                                  color: statusColor,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        subtitle: Text(
+                          'Category: ${student['category']}',
+                          style: TextStyle(
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                        children: [
+                          Padding(
+                            padding: EdgeInsets.all(16),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Email: ${student['email']}',
+                                  style: TextStyle(fontSize: 14),
+                                ),
+                                SizedBox(height: 8),
+                                Text(
+                                  'Sessions Attended: ${student['sessionsAttended']} out of ${student['totalSessions']}',
+                                  style: TextStyle(fontSize: 14),
+                                ),
+                                SizedBox(height: 16),
+                                Text(
+                                  'Attendance Pattern:',
+                                  style: TextStyle(fontWeight: FontWeight.bold),
+                                ),
+                                SizedBox(height: 8),
+                                _buildAttendancePatternIndicator(student['attendancePattern']),
+                                SizedBox(height: 16),
+                                Text(
+                                  _getRecommendation(student),
+                                  style: TextStyle(
+                                    fontStyle: FontStyle.italic,
+                                    color: isEligible ? Colors.green.shade800 : Colors.red.shade800,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }),
+                ],
+              ),
+            ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _generatePDF,
+        tooltip: 'Generate Report',
+        child: Icon(Icons.picture_as_pdf),
+      ),
+    );
+  }
+  
+  Widget _buildStatCard(String title, int value, int total, Color color) {
+    final percentage = total > 0 ? (value / total * 100).toStringAsFixed(1) : '0';
+    
+    return Expanded(
+      child: Container(
+        padding: EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withOpacity(0.3)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 8),
+            Text(
+              '$value / $total ($percentage%)',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: color,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildAttendancePatternIndicator(List<bool> pattern) {
+    return Row(
+      children: pattern.map((attended) {
+        return Container(
+          margin: EdgeInsets.symmetric(horizontal: 2),
+          width: 20,
+          height: 20,
+          decoration: BoxDecoration(
+            color: attended ? Colors.green : Colors.red,
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Center(
+            child: Icon(
+              attended ? Icons.check : Icons.close,
+              color: Colors.white,
+              size: 14,
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+  
+  String _getRecommendation(Map<String, dynamic> student) {
+    final bool isEligible = student['isEligible'];
+    final double percentage = student['attendancePercentage'] * 100;
+    final String category = student['category'];
+    
+    if (isEligible) {
+      if (category == _fullAttendance) {
+        return 'Excellent attendance. Student is eligible for examinations.';
+      } else if (category == _improvingAttendance) {
+        return 'Attendance has been improving. Student is eligible for examinations.';
+      } else {
+        return 'Student meets the minimum attendance requirements for examinations.';
+      }
+    } else {
+      if (category == _lowAttendance) {
+        return 'Warning: Student has critically low attendance and is not eligible for examinations.';
+      } else if (category == _improvingAttendance) {
+        return 'Student shows improvement but still needs more attendance to qualify for examinations.';
+      } else {
+        return 'Student does not meet the minimum attendance requirement for examinations.';
+      }
+    }
+  }
+  
+  Future<void> _generatePDF() async {
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      // Create PDF document
+      final pdf = pw.Document();
+      
+      // Get unit info
+      final unitCode = widget.sessionData['unitCode'] ?? 'Unknown';
+      final unitName = widget.sessionData['unitName'] ?? 'Unknown';
+      final department = widget.sessionData['department'] ?? '';
+      final course = widget.sessionData['course'] ?? '';
+      final year = widget.sessionData['year'] ?? '';
+      final semester = widget.sessionData['semester'] ?? '';
+      
+      // Load logo image for PDF
+      final ByteData? logoData = await rootBundle.load('assets/images/university_logo.png');
+      final Uint8List? logoBytes = logoData?.buffer.asUint8List();
+      final pw.MemoryImage? logoImage = logoBytes != null ? pw.MemoryImage(logoBytes) : null;
+      
+      // Add page to PDF document
+      pdf.addPage(
+        pw.Page(
+          pageFormat: PdfPageFormat.a4,
+          build: (pw.Context context) {
+            return pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                // University header with logo
+                pw.Center(
+                  child: logoImage != null 
+                    ? pw.Container(
+                        height: 100,
+                        width: double.infinity,
+                        child: pw.Image(logoImage, fit: pw.BoxFit.contain),
+                      )
+                    : pw.Container(
+                        height: 70,
+                        child: pw.Text('UNIVERSITY LOGO', 
+                          style: pw.TextStyle(
+                            fontSize: 24, 
+                            fontWeight: pw.FontWeight.bold
+                          )
+                        ),
+                      ),
+                ),
+                
+                pw.SizedBox(height: 20),
+                
+                // Report header
+                pw.Center(
+                  child: pw.Text(
+                    'ATTENDANCE ANALYSIS REPORT',
+                    style: pw.TextStyle(
+                      fontSize: 18,
+                      fontWeight: pw.FontWeight.bold,
+                      decoration: pw.TextDecoration.underline,
+                    ),
+                  ),
+                ),
+                
+                pw.SizedBox(height: 16),
+                
+                // Academic and unit information
+                pw.Container(
+                  padding: pw.EdgeInsets.all(10),
+                  margin: pw.EdgeInsets.only(bottom: 16),
+                  decoration: pw.BoxDecoration(
+                    color: PdfColor.fromInt(0xfff5f5f5), // grey100
+                    border: pw.Border.all(color: PdfColor.fromInt(0xff1565c0), width: 1), // blue800
+                  ),
+                  child: pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      if (department.isNotEmpty)
+                        pw.Text('Department: $department', 
+                          style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 12)),
+                      if (course.isNotEmpty)
+                        pw.Text('Course: $course', 
+                          style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 12)),
+                      if (year.isNotEmpty && semester.isNotEmpty)
+                        pw.Text('Year: $year, Semester: $semester', 
+                          style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 12)),
+                    ],
+                  ),
+                ),
+                
+                pw.Row(
+                  children: [
+                    pw.Expanded(
+                      child: pw.Column(
+                        crossAxisAlignment: pw.CrossAxisAlignment.start,
+                        children: [
+                          pw.Text('Unit Code: $unitCode', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                          pw.Text('Unit Title: $unitName', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                          pw.Text('Date: ${DateTime.now().toString().substring(0, 10)}', 
+                            style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                        ],
+                      ),
+                    ),
+                    pw.Expanded(
+                      child: pw.Column(
+                        crossAxisAlignment: pw.CrossAxisAlignment.end,
+                        children: [
+                          pw.Text('Total Students: ${_attendanceData.length}', 
+                            style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                          pw.Text('Required Attendance: 70%', 
+                            style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                          pw.Text('Required Hours: ${(_totalHoursPerSemester * 0.7).round()} of $_totalHoursPerSemester', 
+                            style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                
+                pw.SizedBox(height: 20),
+                
+                // Attendance summary statistics
+                pw.Text('Attendance Summary:', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 14)),
+                pw.SizedBox(height: 5),
+                
+                // Create summary statistics
+                pw.Container(
+                  padding: pw.EdgeInsets.all(10),
+                  decoration: pw.BoxDecoration(
+                    color: PdfColor.fromInt(0xfff5f5f5), // grey100
+                  ),
+                  child: pw.Column(
+                    children: [
+                      _buildPdfStatRow(
+                        'Eligible for Exams',
+                        _attendanceData.where((s) => s['isEligible'] == true).length,
+                        _attendanceData.length,
+                        PdfColor.fromInt(0xff008800)  // Green
+                      ),
+                      _buildPdfStatRow(
+                        'At Risk Students',
+                        _attendanceData.where((s) => s['isEligible'] == false).length,
+                        _attendanceData.length,
+                        PdfColor.fromInt(0xffcc0000)  // Red
+                      ),
+                      _buildPdfStatRow(
+                        'Full Attendance',
+                        _attendanceData.where((s) => s['category'] == _fullAttendance).length,
+                        _attendanceData.length,
+                        PdfColor.fromInt(0xff0000cc)  // Blue
+                      ),
+                      _buildPdfStatRow(
+                        'Low Attendance',
+                        _attendanceData.where((s) => s['category'] == _lowAttendance).length,
+                        _attendanceData.length,
+                        PdfColor.fromInt(0xffff8800)  // Orange
+                      ),
+                    ],
+                  ),
+                ),
+                
+                pw.SizedBox(height: 20),
+                
+                // Students Table
+                pw.Text('Student Attendance Details:', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 14)),
+                pw.SizedBox(height: 10),
+                
+                // Create table with attendance data
+                pw.Table(
+                  border: pw.TableBorder.all(color: PdfColor.fromInt(0xff000000)), // black
+                  columnWidths: {
+                    0: pw.FlexColumnWidth(3),
+                    1: pw.FlexColumnWidth(3),
+                    2: pw.FlexColumnWidth(2),
+                    3: pw.FlexColumnWidth(2),
+                    4: pw.FlexColumnWidth(2),
+                    5: pw.FlexColumnWidth(2),
+                  },
+                  children: [
+                    // Table header
+                    pw.TableRow(
+                      decoration: pw.BoxDecoration(color: PdfColor.fromInt(0xffe0e0e0)), // grey300
+                      children: [
+                        _pdfTableCell('Student Name', isHeader: true),
+                        _pdfTableCell('Email', isHeader: true),
+                        _pdfTableCell('Attendance %', isHeader: true),
+                        _pdfTableCell('Hours', isHeader: true),
+                        _pdfTableCell('Category', isHeader: true),
+                        _pdfTableCell('Status', isHeader: true),
+                      ],
+                    ),
+                    
+                    // Table rows for each student
+                    ..._attendanceData.map((student) {
+                      final percentage = (student['attendancePercentage'] * 100).toStringAsFixed(1);
+                      final isEligible = student['isEligible'] as bool;
+                      final hours = student['hoursAttended'] as int;
+                      
+                      return pw.TableRow(
+                        decoration: pw.BoxDecoration(
+                          color: isEligible ? null : PdfColor.fromInt(0xffffebee), // red50
+                        ),
+                        children: [
+                          _pdfTableCell(student['name']),
+                          _pdfTableCell(student['email']),
+                          _pdfTableCell('$percentage%'),
+                          _pdfTableCell('$hours/$_totalHoursPerSemester'),
+                          _pdfTableCell(student['category']),
+                          _pdfTableCell(
+                            isEligible ? 'Eligible' : 'At Risk',
+                            textColor: isEligible ? PdfColor.fromInt(0xff008800) : PdfColor.fromInt(0xffcc0000),
+                          ),
+                        ],
+                      );
+                    }).toList(),
+                  ],
+                ),
+                
+                pw.SizedBox(height: 20),
+                
+                // Recommendations and notes
+                pw.Text('Recommendations:', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 14)),
+                pw.SizedBox(height: 5),
+                pw.Container(
+                  padding: pw.EdgeInsets.all(10),
+                  decoration: pw.BoxDecoration(
+                    border: pw.Border.all(color: PdfColor.fromInt(0xff9e9e9e)), // grey
+                    borderRadius: pw.BorderRadius.circular(5),
+                  ),
+                  child: pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text('1. Students with attendance below 70% are at risk of being barred from examinations.'),
+                      pw.SizedBox(height: 5),
+                      pw.Text('2. Consider conducting intervention sessions for students with low attendance.'),
+                      pw.SizedBox(height: 5),
+                      pw.Text('3. Review teaching strategies for sessions with generally low attendance.'),
+                      pw.SizedBox(height: 5),
+                      pw.Text('4. Required minimum attendance for exams: ${(_totalHoursPerSemester * 0.7).round()} hours out of $_totalHoursPerSemester hours.'),
+                    ],
+                  ),
+                ),
+                
+                pw.Spacer(),
+                
+                // Footer with date and page number
+                pw.Row(
+                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                  children: [
+                    pw.Text('Generated: ${DateTime.now().toString().substring(0, 19)}'),
+                    pw.Text('QR Code Attendance App'),
+                  ],
+                ),
+              ],
+            );
+          },
+        ),
+      );
+      
+      // Print the document
+      await Printing.layoutPdf(
+        onLayout: (PdfPageFormat format) async => pdf.save(),
+      );
+    } catch (e) {
+      print('Error generating PDF: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error generating PDF report: $e')),
+      );
+    }
+    
+    setState(() {
+      _isLoading = false;
+    });
+  }
+  
+  pw.Widget _buildPdfStatRow(String label, int value, int total, PdfColor color) {
+    final percentage = total > 0 ? (value / total * 100).toStringAsFixed(1) : '0';
+    
+    return pw.Padding(
+      padding: pw.EdgeInsets.symmetric(vertical: 2),
+      child: pw.Row(
+        mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+        children: [
+          pw.Text(label),
+          pw.Text(
+            '$value / $total ($percentage%)',
+            style: pw.TextStyle(
+              color: color,
+              fontWeight: pw.FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  pw.Widget _pdfTableCell(String text, {bool isHeader = false, PdfColor? textColor}) {
+    return pw.Padding(
+      padding: pw.EdgeInsets.all(6),
+      child: pw.Text(
+        text,
+        style: pw.TextStyle(
+          fontWeight: isHeader ? pw.FontWeight.bold : null,
+          color: textColor,
+        ),
+      ),
+    );
+  }
+} 

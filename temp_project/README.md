@@ -1,4 +1,4 @@
-# final_project
+# temp_project
 
 A new Flutter project.
 
@@ -14,9 +14,3 @@ A few resources to get you started if this is your first Flutter project:
 For help getting started with Flutter development, view the
 [online documentation](https://docs.flutter.dev/), which offers tutorials,
 samples, guidance on mobile development, and a full API reference.
-
-
-
-
-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# Qr-code-Attendance-Mobile-App
-# Qr-code-Attendance-Mobile-App
