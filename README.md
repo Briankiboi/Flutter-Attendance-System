@@ -1,239 +1,229 @@
-# final_project
+# 🎓 QR Code Attendance System
 
-A new Flutter project.
+A modern, secure, and efficient Flutter-based attendance tracking system using QR codes, location verification, and real-time synchronization.
 
-## Getting Started
+## 📱 Features
 
-This project is a starting point for a Flutter application.
+- **QR Code Scanning & Generation**
+  - Dynamic QR code generation for each session
+  - Fast and accurate QR code scanning
+  - Backup key system for fallback scenarios
 
-A few resources to get you started if this is your first Flutter project:
+- **Location-Based Verification**
+  - Geofencing for attendance validation
+  - Mock location detection
+  - Configurable radius settings
+  - Location accuracy monitoring
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+- **Real-time Tracking**
+  - Live attendance updates
+  - Session management
+  - Automatic session expiry
+  - Offline support with sync
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+- **Security Features**
+  - Device fingerprinting
+  - Time synchronization
+  - Network verification
+  - Multiple device detection
+  - Mock location prevention
 
-# QR Code Attendance System with Location Verification
+- **Comprehensive Reporting**
+  - Detailed attendance logs
+  - PDF report generation
+  - Statistical analysis
+  - Data export capabilities
 
-## Current System Features
-- ✅ QR Code Generation by Lecturers
-- ✅ Basic QR Code Scanning by Students
-- ✅ Backup Key System
-- ✅ Session Management
-- ✅ Unit Registration Verification
-- ✅ Student Authentication
+## 🛠️ Tech Stack
 
-## Planned Location-Based Enhancements
+- **Frontend**: Flutter (SDK ≥ 3.0.0)
+- **Backend**: Supabase
+- **Database**: PostgreSQL with PostGIS
+- **Authentication**: Supabase Auth
+- **Storage**: Supabase Storage
+- **Location Services**: Geolocator
+- **QR Scanning**: Mobile Scanner
+- **PDF Generation**: pdf & printing packages
 
-### Database Schema Updates
+## 📋 Prerequisites
 
-#### 1. `attendance_sessions` Table
-```sql
-CREATE TABLE attendance_sessions (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    lecturer_id UUID REFERENCES lecturers(id),
-    unit_code TEXT NOT NULL,
-    qr_code_url TEXT,
-    qr_code_data JSONB,
-    start_time TIMESTAMPTZ NOT NULL,
-    end_time TIMESTAMPTZ NOT NULL,
-    is_active BOOLEAN DEFAULT true,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    backup_key TEXT,
-    latitude DECIMAL(10, 8),
-    longitude DECIMAL(11, 8),
-    radius_meters INTEGER,
-    location_required BOOLEAN DEFAULT true
-);
+- Flutter SDK (≥ 3.0.0)
+- Dart SDK (≥ 3.0.0)
+- Supabase Account
+- Android Studio / VS Code
+- Git
 
--- Add index for faster queries
-CREATE INDEX idx_active_sessions ON attendance_sessions(is_active, unit_code);
+## 🚀 Getting Started
+
+1. **Clone the Repository**
+   ```bash
+   git clone https://github.com/Briankiboi/Flutter-Attendance-System.git
+   cd Flutter-Attendance-System
+   ```
+
+2. **Install Dependencies**
+   ```bash
+   flutter pub get
+   ```
+
+3. **Configure Environment Variables**
+   Create a `.env` file in the root directory:
+   ```env
+   SUPABASE_URL=your_supabase_url
+   SUPABASE_ANON_KEY=your_supabase_anon_key
+   ```
+
+4. **Run the App**
+   ```bash
+   flutter run
+   ```
+
+## 📦 Dependencies
+
+```yaml
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.2
+  qr_flutter: ^4.1.0
+  provider: ^6.1.1
+  shared_preferences: ^2.0.15
+  mobile_scanner: ^6.0.6
+  flutter_datetime_picker: ^1.5.1
+  path_provider: ^2.0.11
+  mailer: ^6.0.1
+  pdf: ^3.11.3
+  printing: ^5.14.2
+  intl: ^0.20.2
+  image_picker: ^1.1.2
+  fl_chart: ^0.70.2
+  http: ^1.1.0
+  connectivity_plus: ^5.0.2
+  crypto: ^3.0.3
+  google_fonts: ^6.1.0
+  package_info_plus: ^8.3.0
+  cached_network_image: ^3.3.1
+  lottie: ^2.6.0
+  curved_navigation_bar: ^1.0.3
+  google_nav_bar: ^5.0.6
+  line_icons: ^2.0.3
+  iconify_flutter: ^0.0.5
+  flutter_native_splash: ^2.2.19
+  photo_view: ^0.14.0
+  geolocator: ^14.0.0
+  geocoding: ^3.0.0
+  internet_connection_checker: ^1.0.0
+  data_table_2: ^2.5.10
+  supabase_flutter: ^2.3.4
+  postgrest: ^2.1.0
+  flutter_dotenv: ^5.1.0
+  device_info_plus: ^9.1.2
+  ntp: ^2.0.0
+  uuid: ^4.5.1
+  excel: ^2.1.0
+  path: ^1.8.3
+  url_launcher: ^6.2.2
+  table_calendar: ^3.2.0
+  google_maps_flutter: ^2.12.2
+  workmanager: ^0.6.0
+  go_router: ^13.1.0
 ```
 
-#### 2. `attendance_records` Table
-```sql
-CREATE TABLE attendance_records (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    session_id UUID REFERENCES attendance_sessions(id),
-    student_id UUID REFERENCES students(id),
-    marked_at TIMESTAMPTZ DEFAULT NOW(),
-    attendance_method TEXT, -- 'QR_CODE' or 'BACKUP_KEY'
-    student_latitude DECIMAL(10, 8),
-    student_longitude DECIMAL(11, 8),
-    distance_meters DECIMAL(10, 2),
-    is_within_radius BOOLEAN,
-    device_info JSONB
-);
-```
+## 🗄️ Database Schema
 
-### Flow Diagram
+The system uses Supabase with the following main tables:
 
-```
-Lecturer Side (Create QR)
-------------------------
-1. Create QR Code
-2. Set Location Parameters
-3. Save to attendance_sessions
-   - Session Details
-   - Location Details
-   - Time Window
-   - Active Status
+- **attendance_sessions**: Stores class session details
+- **attendance**: Records student attendance
+- **student_location_history**: Tracks location data
+- **users**: Manages user accounts
+- **lecturers**: Stores lecturer information
+- **students**: Contains student records
 
-Student Side (Scan QR)
----------------------
-1. Scan QR/Enter Backup Key
-2. Verify:
-   - Unit Registration
-   - Session Active Status
-   - Time Window
-   - Location Match
-3. Record Attendance
-```
+## 🔒 Security Features
 
-### Validation Checks
+1. **Real-time Location Verification**
+   - Geofencing with configurable radius (1-100 meters)
+   - Advanced mock location detection using multiple data points
+   - Location accuracy validation with minimum threshold
+   - Real-time location updates and monitoring
+   - Haversine distance calculation for accuracy
 
-#### Time-based Validation
-- Server-side timestamp comparison
-- Session start/end time validation
-- Automatic session deactivation
-- Rate limiting for multiple attempts
+2. **Device Security**
+   - Device fingerprinting with hardware identifiers
+   - Multiple device detection and prevention
+   - Platform and OS verification
+   - Device tampering detection
+   - Secure device registration
 
-#### Location Validation
-- Haversine distance calculation
-- Configurable radius check
-- GPS accuracy verification
-- Mock location detection
+3. **Time Synchronization**
+   - NTP time synchronization for accuracy
+   - Time drift detection and correction
+   - Session time window validation
+   - Automatic session expiration
+   - Time-based OTP for backup
 
-#### Unit Registration
-- Student enrollment verification
-- Unit schedule matching
-- Semester/academic year validation
+4. **Network Security**
+   - Real-time connection verification
+   - Network type monitoring and validation
+   - API request validation with rate limiting
+   - SSL/TLS encryption for all communications
+   - Secure WebSocket connections for real-time updates
 
-### Security Measures
+5. **Data Security**
+   - End-to-end encryption for sensitive data
+   - Secure key storage and management
+   - Regular security audits and logging
+   - Data backup and recovery systems
+   - GDPR and CCPA compliance ready
 
-1. **QR Code Security**
-   - Encrypted session data
-   - Time-based expiration
-   - Single-use validation
+## 📊 Monitoring & Analytics
 
-2. **Location Security**
-   - GPS spoofing detection
-   - Accuracy threshold checks
-   - Server-side validation
+- Real-time attendance tracking
+- Session statistics and analytics
+- Location accuracy monitoring
+- Device usage analytics
+- Network performance metrics
+- Security incident logging
+- Audit trail maintenance
 
-3. **Session Security**
-   - Real-time status updates
-   - Automatic timeout
-   - Device fingerprinting
+## 🤝 Contributing
 
-### Implementation Status
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
-#### Completed
-- ✅ Basic QR generation
-- ✅ QR scanning interface
-- ✅ Session management
-- ✅ Backup key system
-- ✅ Student authentication
+## 📝 License
 
-#### In Progress
-- 🟡 Location validation
-- 🟡 Time-based expiration
-- 🟡 GPS integration
-- 🟡 Distance calculation
+MIT License
 
-#### Pending
-- ⭕ Mock location detection
-- ⭕ Advanced security measures
-- ⭕ Offline support
-- ⭕ Analytics dashboard
+Copyright (c) 2024 Brian Kiboi
 
-### Usage Flow
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-1. **Lecturer Creates Session**
-   ```
-   Create QR Code
-   └── Set Parameters
-       ├── Unit Details
-       ├── Time Window
-       ├── Location
-       └── Radius
-   ```
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-2. **Student Marks Attendance**
-   ```
-   Scan QR/Enter Key
-   └── Validation Checks
-       ├── Unit Registration
-       ├── Time Window
-       ├── Location
-       └── Previous Attendance
-   ```
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
-3. **System Verification**
-   ```
-   Validate Request
-   └── Check
-       ├── Session Active
-       ├── Time Valid
-       ├── Location Match
-       └── Student Eligible
-   ```
+## 👥 Authors
 
-### Error Handling
+- Brian Kiboi - Initial work - [Briankiboi](https://github.com/Briankiboi)
 
-- Invalid location data
-- Expired sessions
-- Network issues
-- GPS accuracy problems
-- Unit registration mismatches
-- Time synchronization errors
+## 🙏 Acknowledgments
 
-### Best Practices
+- All contributors who have helped this project grow-[https://github.com/kelvin482/] logo designer 
 
-1. **Location Services**
-   - Request permissions early
-   - Clear user communication
-   - Fallback mechanisms
-   - Accuracy indicators
-
-2. **Time Management**
-   - Server time synchronization
-   - Grace periods
-   - Time zone handling
-   - Buffer windows
-
-3. **User Experience**
-   - Clear error messages
-   - Status indicators
-   - Progress feedback
-   - Retry options
-
-### Configuration Options
-
-```json
-{
-  "location": {
-    "minRadius": 1,
-    "maxRadius": 100,
-    "accuracyThreshold": 20,
-    "updateInterval": 30
-  },
-  "session": {
-    "graceperiod": 5,
-    "maxRetries": 3,
-    "backupKeyLength": 11
-  }
-}
-```
-
-## Next Steps
-1. Implement location validation in QR scanning
-2. Add radius configuration in session creation
-3. Create location verification middleware
-4. Update database schema
-5. Add real-time session status updates
-6. Implement server-side time validation
-7. Add location spoofing detection
-8. Create comprehensive error handling
