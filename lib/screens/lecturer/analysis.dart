@@ -34,7 +34,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
   int _absentCount = 0;
   
   // Add new variables for eligibility tracking
-  Map<String, Map<String, dynamic>> _studentEligibility = {};
+  final Map<String, Map<String, dynamic>> _studentEligibility = {};
   final int _totalRequiredHours = 36;
   final int _minimumRequiredHours = 25;
   
@@ -145,13 +145,139 @@ class _AnalysisPageState extends State<AnalysisPage> {
       
       print('Session duration in hours: $sessionDuration');
       
-      // Calculate counts based on actual attendance data
-      _presentCount = attendees.length;
-      _totalStudents = selectedStudents.length;
-      _absentCount = _totalStudents - _presentCount;
+      // Get explicit counts if available - these are more reliable
+      int explicitTotal = 0;
+      int explicitPresent = 0;
+      int explicitAbsent = 0;
+      
+      if (data.containsKey('totalStudents') && data['totalStudents'] != null) {
+        explicitTotal = data['totalStudents'] is int 
+            ? data['totalStudents'] 
+            : int.tryParse(data['totalStudents'].toString()) ?? 0;
+      }
+      
+      if (data.containsKey('presentCount') && data['presentCount'] != null) {
+        explicitPresent = data['presentCount'] is int 
+            ? data['presentCount'] 
+            : int.tryParse(data['presentCount'].toString()) ?? 0;
+      }
+      
+      if (data.containsKey('absentCount') && data['absentCount'] != null) {
+        explicitAbsent = data['absentCount'] is int 
+            ? data['absentCount'] 
+            : int.tryParse(data['absentCount'].toString()) ?? 0;
+      }
+      
+      // Calculate from explicit total/absent/present values first if available
+      if (explicitTotal > 0 || explicitPresent > 0 || explicitAbsent > 0) {
+        if (explicitTotal > 0) {
+          _totalStudents = explicitTotal;
+          if (explicitPresent > 0) {
+            _presentCount = explicitPresent;
+            _absentCount = _totalStudents - _presentCount;
+          } else if (explicitAbsent > 0) {
+            _absentCount = explicitAbsent;
+            _presentCount = _totalStudents - _absentCount;
+          } else {
+            _presentCount = attendees.length;
+            _absentCount = _totalStudents - _presentCount;
+          }
+        } else {
+          // If we don't have total but have present and absent
+          if (explicitPresent > 0 && explicitAbsent > 0) {
+            _presentCount = explicitPresent;
+            _absentCount = explicitAbsent;
+            _totalStudents = _presentCount + _absentCount;
+          } else if (explicitPresent > 0) {
+            _presentCount = explicitPresent;
+            _absentCount = selectedStudents.length - explicitPresent;
+            _totalStudents = selectedStudents.isNotEmpty ? selectedStudents.length : _presentCount;
+          } else if (explicitAbsent > 0) {
+            _absentCount = explicitAbsent;
+            _presentCount = attendees.length;
+            _totalStudents = _presentCount + _absentCount;
+          }
+        }
+      } else {
+        // Fall back to calculating from attendees/selectedStudents
+        _presentCount = attendees.length;
+        
+        if (selectedStudents.isNotEmpty) {
+          _totalStudents = selectedStudents.length;
+          _absentCount = _totalStudents - _presentCount;
+        } else if (data.containsKey('attendeeDetails') && data['attendeeDetails'] is List) {
+          // Calculate from attendee details
+          final attendeeDetails = data['attendeeDetails'] as List;
+          _totalStudents = attendeeDetails.length;
+          
+          int presentCount = 0;
+          int absentCount = 0;
+          
+          for (var attendee in attendeeDetails) {
+            if (attendee is Map<String, dynamic>) {
+              final details = attendee['details'];
+              bool isAbsent = false;
+              
+              if (details is Map) {
+                if (details.containsKey('status') && details['status'] == 'absent') {
+                  isAbsent = true;
+                } else if (details.containsKey('timestamp') && details['timestamp'] == null) {
+                  isAbsent = true;
+                }
+              }
+              
+              if (isAbsent) {
+                absentCount++;
+              } else {
+                presentCount++;
+              }
+            }
+          }
+          
+          if (presentCount > 0 || absentCount > 0) {
+            _presentCount = presentCount;
+            _absentCount = absentCount;
+            _totalStudents = presentCount + absentCount;
+          } else {
+            // Try to extract from other data like "Total Students: N" string
+            String dataStr = data.toString();
+            RegExp totalRegex = RegExp(r'Total Students: (\d+)');
+            RegExp presentRegex = RegExp(r'Present: (\d+)');
+            RegExp absentRegex = RegExp(r'Absent: (\d+)');
+            
+            Match? totalMatch = totalRegex.firstMatch(dataStr);
+            Match? presentMatch = presentRegex.firstMatch(dataStr);
+            Match? absentMatch = absentRegex.firstMatch(dataStr);
+            
+            if (totalMatch != null) {
+              _totalStudents = int.tryParse(totalMatch.group(1) ?? '0') ?? 0;
+            } else if (presentMatch != null && absentMatch != null) {
+              int presentCount = int.tryParse(presentMatch.group(1) ?? '0') ?? 0;
+              int absentCount = int.tryParse(absentMatch.group(1) ?? '0') ?? 0;
+              _presentCount = presentCount > 0 ? presentCount : _presentCount;
+              _absentCount = absentCount;
+              _totalStudents = _presentCount + _absentCount;
+              print('Extracted from regex - Present: $_presentCount, Absent: $_absentCount, Total: $_totalStudents');
+            } else {
+              _totalStudents = _presentCount;
+              _absentCount = 0;
+            }
+          }
+        } else {
+          // Last resort: set total to present count (no absent students)
+          _totalStudents = _presentCount;
+          _absentCount = 0;
+        }
+      }
       
       // Safety check to ensure absent count isn't negative
       if (_absentCount < 0) _absentCount = 0;
+      // Ensure total students is at least the sum of present and absent
+      if (_totalStudents < (_presentCount + _absentCount)) {
+        _totalStudents = _presentCount + _absentCount;
+      }
+      
+      print('Final counts - Present: $_presentCount, Absent: $_absentCount, Total: $_totalStudents');
       
       // Process attendance data maintaining exact format
       List<Map<String, dynamic>> realAttendanceData = [];
@@ -258,15 +384,18 @@ class _AnalysisPageState extends State<AnalysisPage> {
                : '')
           .toSet();
       
-      for (var student in selectedStudents) {
+      // Process absent students with different approaches to ensure they are included
+      // First, get any explicit absentees list
+      final List<dynamic> absenteesList = data['absentees'] ?? [];
+      for (var student in absenteesList) {
         if (student is Map<String, dynamic>) {
-          final email = (student['email'] ?? '').toString().toLowerCase();
+          final email = (student['studentEmail'] ?? student['email'] ?? '').toString().toLowerCase();
           if (email.isNotEmpty && !attendeeEmails.contains(email)) {
-            final studentName = student['name'] ?? 'Unknown Student';
+            final studentName = student['studentName'] ?? student['name'] ?? 'Unknown Student';
             final studentYear = student['year'];
             final yearString = studentYear != null ? studentYear.toString() : '';
             final regNumber = student['registrationNumber'] ?? 
-                          email.split('@')[0] ?? '';
+                         (email.isNotEmpty ? email.split('@')[0] : '');
             
             // Check eligibility for absent student too
             final studentId = regNumber.isNotEmpty ? regNumber : email;
@@ -284,6 +413,148 @@ class _AnalysisPageState extends State<AnalysisPage> {
           }
         }
       }
+      
+      // Then, try to get absent students from selectedStudents list
+      for (var student in selectedStudents) {
+        if (student is Map<String, dynamic>) {
+          final email = (student['email'] ?? '').toString().toLowerCase();
+          if (email.isNotEmpty && !attendeeEmails.contains(email)) {
+            // Check if already added from absentees list
+            bool alreadyAdded = false;
+            for (var existingStudent in realAttendanceData) {
+              final existingEmail = (existingStudent['email'] ?? '').toString().toLowerCase();
+              if (existingEmail == email) {
+                alreadyAdded = true;
+                break;
+              }
+            }
+            
+            if (!alreadyAdded) {
+              final studentName = student['name'] ?? 'Unknown Student';
+              final studentYear = student['year'];
+              final yearString = studentYear != null ? studentYear.toString() : '';
+              final regNumber = student['registrationNumber'] ?? 
+                            (email.isNotEmpty ? email.split('@')[0] : '');
+              
+              // Check eligibility for absent student too
+              final studentId = regNumber.isNotEmpty ? regNumber : email;
+              final attendedHours = _studentEligibility[studentId]?['attendedHours'] ?? 0.0;
+              
+              realAttendanceData.add({
+                'name': studentName,
+                'email': email,
+                'status': 'Absent',
+                'timeMarked': 'null', // Exact format from print attendance
+                'registrationNumber': regNumber,
+                'year': yearString,
+                'eligibility': _calculateEligibilityPercent(attendedHours),
+              });
+            }
+          }
+        }
+      }
+      
+      // Create placeholder absent students if we still need more
+      final int absentStudentsNeeded = _absentCount - realAttendanceData.where((s) => s['status'] == 'Absent').length;
+      if (absentStudentsNeeded > 0) {
+        // Get absent students from session data directly
+        final absenteesList = data['absentees'] as List<dynamic>? ?? [];
+        
+        // Use the previously defined set of attendee emails
+        final knownAttendeeEmails = attendeeEmails;
+        
+        // Add missing absentees from the absentees list
+        for (var absentee in absenteesList) {
+          if (absentee is Map<String, dynamic>) {
+            final email = (absentee['email'] ?? absentee['studentEmail'] ?? '').toString().toLowerCase();
+            
+            if (email.isNotEmpty && !knownAttendeeEmails.contains(email)) {
+              // Check if already added from previous loop
+              bool alreadyAdded = false;
+              for (var existingStudent in realAttendanceData) {
+                if ((existingStudent['email'] ?? '').toString().toLowerCase() == email) {
+                  alreadyAdded = true;
+                  break;
+                }
+              }
+              
+              if (!alreadyAdded) {
+                final studentName = absentee['name'] ?? absentee['studentName'] ?? 'Unknown Student';
+                final regNumber = absentee['registrationNumber'] ?? (email.isNotEmpty ? email.split('@')[0] : '');
+                
+                // Check eligibility for absent student too
+                final studentId = regNumber.isNotEmpty ? regNumber : email;
+                final attendedHours = _studentEligibility[studentId]?['attendedHours'] ?? 0.0;
+                
+                realAttendanceData.add({
+                  'name': studentName,
+                  'email': email,
+                  'status': 'Absent',
+                  'timeMarked': 'null',
+                  'registrationNumber': regNumber,
+                  'year': '0.0',
+                  'eligibility': _calculateEligibilityPercent(attendedHours),
+                });
+              }
+            }
+          }
+        }
+        
+        // If we still need more absent students, check attendeeDetails for records marked as absent
+        if (realAttendanceData.where((s) => s['status'] == 'Absent').length < _absentCount && 
+            data.containsKey('attendeeDetails')) {
+          final attendeeDetails = data['attendeeDetails'] as List<dynamic>? ?? [];
+          
+          for (var attendee in attendeeDetails) {
+            if (attendee is Map<String, dynamic>) {
+              final details = attendee['details'];
+              bool isAbsent = false;
+              
+              if (details is Map) {
+                if (details.containsKey('status') && details['status'] == 'absent') {
+                  isAbsent = true;
+                } else if (details.containsKey('timestamp') && details['timestamp'] == null) {
+                  isAbsent = true;
+                }
+              }
+              
+              if (isAbsent) {
+                final email = (attendee['email'] ?? '').toString().toLowerCase();
+                
+                // Check if already added
+                bool alreadyAdded = false;
+                for (var existingStudent in realAttendanceData) {
+                  if ((existingStudent['email'] ?? '').toString().toLowerCase() == email) {
+                    alreadyAdded = true;
+                    break;
+                  }
+                }
+                
+                if (!alreadyAdded && email.isNotEmpty) {
+                  final studentName = details is Map ? (details['name'] ?? details['studentName'] ?? 'Unknown Student') : 'Unknown Student';
+                  final regNumber = attendee['registrationNumber'] ?? (email.isNotEmpty ? email.split('@')[0] : '');
+                  
+                  // Check eligibility for absent student too
+                  final studentId = regNumber.isNotEmpty ? regNumber : email;
+                  final attendedHours = _studentEligibility[studentId]?['attendedHours'] ?? 0.0;
+                  
+                  realAttendanceData.add({
+                    'name': studentName,
+                    'email': email,
+                    'status': 'Absent',
+                    'timeMarked': 'null',
+                    'registrationNumber': regNumber,
+                    'year': '0.0',
+                    'eligibility': _calculateEligibilityPercent(attendedHours),
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+      
+      print('Added ${realAttendanceData.where((s) => s['status'] == 'Absent').length} absent students out of required $_absentCount');
       
       // Update state with actual data
       setState(() {
@@ -505,14 +776,14 @@ class _AnalysisPageState extends State<AnalysisPage> {
     
     try {
       // Load university logo
-      final ByteData? logoData = await rootBundle.load('assets/images/university_logo.png');
+      final ByteData logoData = await rootBundle.load('assets/images/university_logo.png');
       if (logoData != null) {
         final Uint8List logoBytes = logoData.buffer.asUint8List();
         logoImage = pw.MemoryImage(logoBytes);
       }
       
       // Load QR Code app logo/icon
-      final ByteData? qrCodeData = await rootBundle.load('assets/images/icons.png');
+      final ByteData qrCodeData = await rootBundle.load('assets/images/icons.png');
       if (qrCodeData != null) {
         final Uint8List qrCodeBytes = qrCodeData.buffer.asUint8List();
         qrCodeLogo = pw.MemoryImage(qrCodeBytes);
@@ -1064,8 +1335,8 @@ class _AnalysisPageState extends State<AnalysisPage> {
                               ),
                               PieChartSectionData(
                                 color: Colors.red,
-                                value: _absentCount.toDouble(),
-                                  title: 'Absent\n$_absentCount',
+                                value: _absentCount > 0 ? _absentCount.toDouble() : 0.01, // Ensure visible even if 0 for UI
+                                title: 'Absent\n$_absentCount',
                                 radius: 80,
                                 titleStyle: TextStyle(
                                   color: Colors.white,
@@ -1274,12 +1545,17 @@ class _AnalysisPageState extends State<AnalysisPage> {
   }
   
   Widget _buildEligibilityDetailTile(String title, int count, int total, Color color) {
-    final percentage = total > 0 ? (count / total * 100).roundToDouble() : 0.0;
+    double percentage = 0.0;
+    if (total > 0) {
+      percentage = (count / total * 100);
+      percentage = percentage.isNaN ? 0.0 : percentage.roundToDouble();
+    }
+    
     return Padding(
       padding: EdgeInsets.symmetric(vertical: 4.0),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
+        children: [
           Text(title),
           Row(
             children: [
@@ -1293,13 +1569,13 @@ class _AnalysisPageState extends State<AnalysisPage> {
               ),
               SizedBox(width: 8),
               Text(
-                '$count ($percentage%)',
+                '$count (${percentage.toStringAsFixed(1)}%)',
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
             ],
-                      ),
-                    ],
-                  ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1336,7 +1612,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
               ),
             ),
             
-                      // Present students
+            // Present students section - keep as is
                       ..._attendanceData
                         .where((student) => student['status'] == 'Present')
               .map((student) {
@@ -1396,67 +1672,145 @@ class _AnalysisPageState extends State<AnalysisPage> {
             // Divider between present and absent students
             if (_presentCount > 0 && _absentCount > 0) Divider(height: 32),
             
-            // Absent students with enhanced styling (red background)
-                      ..._attendanceData
-                        .where((student) => student['status'] == 'Absent')
-              .map((student) {
-                final studentId = student['registrationNumber'] ?? student['email'] ?? '';
-                final attendedHours = _studentEligibility[studentId]?['attendedHours'] ?? 0.0;
-                final isEligible = _isEligibleForExam(attendedHours);
-                final eligibilityPercent = _calculateEligibilityPercent(attendedHours);
-                
-                return Container(
-                  padding: EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-                  decoration: BoxDecoration(
-                    border: Border(bottom: BorderSide(color: Colors.grey[300]!)),
-                    color: Colors.red[50], // Light red background
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(flex: 2, child: Text(student['name'], style: TextStyle(color: Colors.red[900]))),
-                      Expanded(flex: 2, child: Text(_extractRegNumber(student['email']), style: TextStyle(color: Colors.red[900]))),
-                      Expanded(flex: 1, child: Text('0.0', style: TextStyle(color: Colors.red[900]))), // 0.0 for absent students
-                      Expanded(flex: 1, child: Text('${attendedHours.toStringAsFixed(1)}', style: TextStyle(color: Colors.red[900]))),
-                      Expanded(
-                        flex: 1,
-                        child: Container(
-                          padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: Colors.red[100],
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Text(
-                            'Absent',
-                            style: TextStyle(color: Colors.red[900], fontSize: 12),
-                          ),
-                        ),
-                      ),
-                      Expanded(
-                        flex: 1,
-                        child: Container(
-                          padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: isEligible ? Colors.green[100] : Colors.red[100],
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Text(
-                            '${eligibilityPercent.toStringAsFixed(0)}%',
-                            style: TextStyle(
-                              color: isEligible ? Colors.green[800] : Colors.red[800],
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }),
+            // Absent students section
+            ..._buildAbsentStudentsList(),
           ],
         ),
       ),
     );
+  }
+
+  // New helper method to generate absent student widgets
+  List<Widget> _buildAbsentStudentsList() {
+    // Make sure we have the correct count of absent students
+    List<Map<String, dynamic>> absentStudents = _attendanceData
+        .where((student) => student['status'] == 'Absent')
+        .toList();
+    
+    // If we don't have enough absent students in the data, create placeholders as needed
+    if (absentStudents.length < _absentCount) {
+      print('Not enough absent students in data: ${absentStudents.length} < $_absentCount');
+      
+      // Get data from the real session data instead of hardcoding
+      final absenteesList = widget.sessionData['absentees'] as List<dynamic>? ?? [];
+      
+      for (var absentee in absenteesList) {
+        if (absentee is Map<String, dynamic>) {
+          final name = absentee['name'] ?? absentee['studentName'] ?? '';
+          final email = absentee['email'] ?? absentee['studentEmail'] ?? '';
+          
+          // Check if student is already in the list
+          bool alreadyAdded = absentStudents.any((s) => 
+            (s['email'] == email) || (s['name'] == name && name.isNotEmpty));
+            
+          if (!alreadyAdded && name.isNotEmpty) {
+            final regNumber = email.contains('@') ? email.split('@')[0] : '';
+            
+            absentStudents.add({
+              'name': name,
+              'email': email,
+              'status': 'Absent',
+              'timeMarked': 'null',
+              'registrationNumber': regNumber,
+              'year': '0.0',
+              'eligibility': 0.0,
+            });
+          }
+        }
+      }
+      
+      // If still missing students, check attendeeDetails for more absent students
+      if (absentStudents.length < _absentCount && widget.sessionData.containsKey('attendeeDetails')) {
+        final attendeeDetails = widget.sessionData['attendeeDetails'] as List<dynamic>? ?? [];
+        
+        for (var attendee in attendeeDetails) {
+          if (attendee is Map<String, dynamic>) {
+            final details = attendee['details'] as Map<String, dynamic>? ?? {};
+            
+            if (details.containsKey('status') && details['status'] == 'absent') {
+              final name = details['name'] ?? details['studentName'] ?? 'Student';
+              final email = attendee['email'] ?? '';
+              
+              // Check if student is already in the list
+              bool alreadyAdded = absentStudents.any((s) => 
+                (s['email'] == email) || (s['name'] == name && name.isNotEmpty));
+                
+              if (!alreadyAdded) {
+                final regNumber = email.contains('@') ? email.split('@')[0] : '';
+                
+                absentStudents.add({
+                  'name': name,
+                  'email': email,
+                  'status': 'Absent',
+                  'timeMarked': 'null',
+                  'registrationNumber': regNumber,
+                  'year': '0.0',
+                  'eligibility': 0.0,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    print('Rendering ${absentStudents.length} absent students');
+    
+    // Map the absent students to widgets
+    return absentStudents.map((student) {
+      final studentId = student['registrationNumber'] ?? student['email'] ?? '';
+      final attendedHours = _studentEligibility[studentId]?['attendedHours'] ?? 0.0;
+      final isEligible = _isEligibleForExam(attendedHours);
+      final eligibilityPercent = _calculateEligibilityPercent(attendedHours);
+      
+      return Container(
+        padding: EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: Colors.grey[300]!)),
+          color: Colors.red[50], // Light red background
+        ),
+        child: Row(
+          children: [
+            Expanded(flex: 2, child: Text(student['name'], style: TextStyle(color: Colors.red[900]))),
+            Expanded(flex: 2, child: Text(_extractRegNumber(student['email']), style: TextStyle(color: Colors.red[900]))),
+            Expanded(flex: 1, child: Text('0.0', style: TextStyle(color: Colors.red[900]))), // 0.0 for absent students
+            Expanded(flex: 1, child: Text('${attendedHours.toStringAsFixed(1)}', style: TextStyle(color: Colors.red[900]))),
+            Expanded(
+              flex: 1,
+              child: Container(
+                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.red[100],
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  'Absent',
+                  style: TextStyle(color: Colors.red[900], fontSize: 12),
+                ),
+              ),
+            ),
+            Expanded(
+              flex: 1,
+              child: Container(
+                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: isEligible ? Colors.green[100] : Colors.red[100],
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  '${eligibilityPercent.toStringAsFixed(0)}%',
+                  style: TextStyle(
+                    color: isEligible ? Colors.green[800] : Colors.red[800],
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }).toList();
   }
 
   Widget _buildSessionInfoCard() {
@@ -1529,8 +1883,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
   }
 
   double _calculateAttendanceRate() {
-    if (_totalStudents == 0) return 0;
-    return (_presentCount / _totalStudents * 100).roundToDouble();
+    if (_totalStudents == 0) return 0.0;
+    double rate = (_presentCount / _totalStudents * 100);
+    return rate.isNaN ? 0.0 : rate.roundToDouble();
   }
 
   Color _getAttendanceColor(double rate) {
@@ -1540,7 +1895,12 @@ class _AnalysisPageState extends State<AnalysisPage> {
   }
 
   Widget _buildAttendanceDetailTile(String title, int count, int total, Color color) {
-    final percentage = total > 0 ? (count / total * 100).roundToDouble() : 0.0;
+    double percentage = 0.0;
+    if (total > 0) {
+      percentage = (count / total * 100);
+      percentage = percentage.isNaN ? 0.0 : percentage.roundToDouble();
+    }
+    
     return Padding(
       padding: EdgeInsets.symmetric(vertical: 4.0),
       child: Row(
@@ -1559,7 +1919,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
               ),
               SizedBox(width: 8),
               Text(
-                '$count ($percentage%)',
+                '$count (${percentage.toStringAsFixed(1)}%)',
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
             ],

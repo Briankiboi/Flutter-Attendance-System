@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 class RegisterUnitPage extends StatelessWidget {
+  const RegisterUnitPage({super.key});
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(

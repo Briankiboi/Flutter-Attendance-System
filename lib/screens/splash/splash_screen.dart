@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:qr_attendance/routes/app_routes.dart';
 
 class SplashScreen extends StatefulWidget {
+  const SplashScreen({super.key});
+
   @override
   _SplashScreenState createState() => _SplashScreenState();
 }
@@ -36,7 +38,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
   }
 
   void _navigateToNext() async {
-    await Future.delayed(const Duration(seconds: 10));
+    await Future.delayed(const Duration(seconds: 7));
     print('SplashScreen - navigation delay completed');
     if (mounted) {
       print('SplashScreen - navigating to role selection');
@@ -75,7 +77,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                       ],
                     ),
                     child: Image.asset(
-                      'assets/images/logo.png',
+                      'assets/images/Tharak auni log.png',
                       width: 120,
                       height: 120,
                       fit: BoxFit.contain,
@@ -89,7 +91,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                             shape: BoxShape.circle,
                           ),
                           child: const Icon(
-                            Icons.qr_code,
+                            Icons.school,
                             size: 70,
                             color: Colors.blue,
                           ),
@@ -99,7 +101,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                   ),
                   const SizedBox(height: 30),
                   const Text(
-                    'QR Code Attendance',
+                    ' TU Attendance App',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 32,
@@ -117,7 +119,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                   ),
                   const SizedBox(height: 10),
                   const Text(
-                    'Tharaka University App',
+                    'Education For Freedom',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 18,

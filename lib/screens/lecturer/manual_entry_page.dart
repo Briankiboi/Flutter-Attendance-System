@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 class ManualEntryPage extends StatefulWidget {
-  const ManualEntryPage({Key? key}) : super(key: key);
+  const ManualEntryPage({super.key});
 
   @override
   State<ManualEntryPage> createState() => _ManualEntryPageState();

@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
+import 'package:qr_attendance/services/supabase_service.dart';
 
 class UpdateDetailsPage extends StatefulWidget {
-  const UpdateDetailsPage({Key? key}) : super(key: key);
+  const UpdateDetailsPage({super.key});
 
   @override
   State<UpdateDetailsPage> createState() => _UpdateDetailsPageState();
@@ -22,6 +23,15 @@ class _UpdateDetailsPageState extends State<UpdateDetailsPage> {
   String? _selectedYear;
   String? _selectedSemester;
   String? _currentStoredPassword;
+  String? _userId;
+  String? _studentId;
+  
+  // Original values to track changes
+  String? _originalName;
+  String? _originalDepartment;
+  String? _originalCourse;
+  String? _originalYear;
+  String? _originalSemester;
   
   bool _obscureCurrentPassword = true;
   bool _obscurePassword = true;
@@ -30,6 +40,9 @@ class _UpdateDetailsPageState extends State<UpdateDetailsPage> {
   bool _isChangingPassword = false;
   String _successMessage = '';
   String _errorMessage = '';
+
+  // Supabase service
+  final _supabaseService = SupabaseService();
   
   final Map<String, List<String>> _departmentCourses = {
     'Computer Science': ['Computer Science', 'Software Engineering', 'Data Science'],
@@ -47,10 +60,76 @@ class _UpdateDetailsPageState extends State<UpdateDetailsPage> {
         : [];
   }
   
+  // Helper method to format year for display
+  String _formatYearForDisplay(String year) {
+    return 'Year $year';
+  }
+  
+  // Helper method to extract year value from display text
+  String _extractYearValue(String displayText) {
+    return displayText.replaceAll('Year ', '');
+  }
+  
   @override
   void initState() {
     super.initState();
     _loadUserData();
+  }
+  
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    
+    // Get data from navigation arguments if available
+    final args = ModalRoute.of(context)?.settings.arguments;
+    if (args is Map<String, dynamic>) {
+      // If data is passed directly from dashboard, use it to pre-populate fields
+      if (args.containsKey('userData') && args['userData'] != null) {
+        final userData = args['userData'] as Map<String, dynamic>;
+        _populateUserDataFromArgs(userData);
+      }
+    }
+  }
+  
+  void _populateUserDataFromArgs(Map<String, dynamic> userData) {
+    if (mounted) {
+      setState(() {
+        _email = userData['email'];
+        _nameController.text = userData['name'] ?? '';
+        _originalName = userData['name'];
+        
+        _selectedDepartment = userData['department'];
+        _originalDepartment = userData['department'];
+        
+        _selectedCourse = userData['course'];
+        _originalCourse = userData['course'];
+        
+        // Process year value
+        String yearValue = (userData['year'] ?? '').toString().replaceAll('Year ', '');
+        _selectedYear = yearValue;
+        _originalYear = yearValue;
+        
+        _selectedSemester = userData['semester']?.toString().replaceAll('Semester ', '');
+        _originalSemester = _selectedSemester;
+        
+        _userId = userData['id'];
+        _studentId = userData['student_id'];
+        _currentStoredPassword = userData['password'];
+      });
+      
+      // Ensure course list contains the selected course
+      _ensureCoursesContainSelected();
+    }
+  }
+  
+  void _ensureCoursesContainSelected() {
+    if (_selectedDepartment != null && _selectedCourse != null) {
+      if (!_departmentCourses.containsKey(_selectedDepartment)) {
+        _departmentCourses[_selectedDepartment!] = [_selectedCourse!];
+      } else if (!_departmentCourses[_selectedDepartment]!.contains(_selectedCourse)) {
+        _departmentCourses[_selectedDepartment]!.add(_selectedCourse!);
+      }
+    }
   }
   
   Future<void> _loadUserData() async {
@@ -61,44 +140,84 @@ class _UpdateDetailsPageState extends State<UpdateDetailsPage> {
     });
     
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final email = prefs.getString('current_user_email');
+      // Get current user data from Supabase service
+      final userData = _supabaseService.getCurrentUser();
       
-      if (email != null && email.isNotEmpty) {
-        final userDataString = prefs.getString(email);
-        if (userDataString != null) {
-          final userData = json.decode(userDataString) as Map<String, dynamic>;
+      if (userData != null) {
+        // Store original values to track changes
+        _originalName = userData['name'];
+        _originalDepartment = userData['department'];
+        _originalCourse = userData['course'];
+        
+        // Process year value
+        String yearValue = (userData['year'] ?? '').toString().replaceAll('Year ', '');
+        _originalYear = yearValue;
+        
+        String semesterValue = (userData['semester'] ?? '').toString().replaceAll('Semester ', '');
+        _originalSemester = semesterValue;
+        
+        // Store current password for verification
+        _currentStoredPassword = userData['password'];
+        
+        // Ensure the full department-course information is displayed correctly
+        final String? department = userData['department'];
+        final String? course = userData['course'];
+        
+        // Handle compound course names like "Computer Science - Software Engineering"
+        // by ensuring both department and course are properly set
+        
+        // First, check if course contains department info (e.g., "Computer Science - Software Engineering")
+        String? processedDepartment = department;
+        String? processedCourse = course;
+        
+        if (course != null && course.contains('-')) {
+          // If course contains a hyphen, it might be a compound name
+          // Add both the full name and components to the appropriate dropdown lists
+          final parts = course.split('-').map((part) => part.trim()).toList();
           
-          // Store current password for verification
-          _currentStoredPassword = userData['password'];
-          
-          setState(() {
-            _email = email;
-            _nameController.text = userData['name'] ?? '';
-            _selectedDepartment = userData['department'];
-            _selectedCourse = userData['course'];
-            _selectedYear = userData['year'];
-            _selectedSemester = userData['semester'];
-          });
-          
-          // Print loaded data for debugging
-          print('Loaded user data: Name=${_nameController.text}, Dept=${_selectedDepartment}, Course=${_selectedCourse}, Year=${_selectedYear}, Semester=${_selectedSemester}');
-        } else {
-          print('No user data found for email: $email');
-          setState(() {
-            _email = email;
-            _nameController.text = prefs.getString('user_name_$email') ?? prefs.getString('current_user_name') ?? '';
-            _selectedDepartment = prefs.getString('user_department_$email') ?? prefs.getString('current_user_department');
-            _selectedCourse = prefs.getString('user_course_$email') ?? prefs.getString('current_user_course');
-            _selectedYear = prefs.getString('user_year_$email') ?? prefs.getString('current_user_year');
-            _selectedSemester = prefs.getString('user_semester_$email') ?? prefs.getString('current_user_semester');
-          });
+          if (parts.length > 1) {
+            // First part is often the department
+            if (department == null || department.isEmpty || department == parts[0]) {
+              processedDepartment = parts[0];
+              
+              // Using the full course name as it appears in the dashboard
+              processedCourse = course;
+              
+              // Ensure this compound name is available in dropdown
+              if (!_departmentCourses.containsKey(processedDepartment)) {
+                _departmentCourses[processedDepartment] = [processedCourse];
+              } else if (!_departmentCourses[processedDepartment]!.contains(processedCourse)) {
+                _departmentCourses[processedDepartment]!.add(processedCourse);
+              }
+            }
+          }
         }
+        
+        setState(() {
+          _email = userData['email'];
+          _nameController.text = userData['name'] ?? '';
+          _selectedDepartment = processedDepartment;
+          _selectedCourse = processedCourse;
+          _selectedYear = yearValue;
+          _selectedSemester = semesterValue;
+          _userId = userData['id'];
+          _studentId = userData['student_id'];
+        });
+        
+        // Ensure the course list contains the selected course
+        _ensureCoursesContainSelected();
+        
+        print('Loaded user data for profile update: Name=${_nameController.text}, Department=$_selectedDepartment, Course=$_selectedCourse, Year=$_selectedYear, Semester=$_selectedSemester');
+      } else {
+        print('No user data available - user not logged in');
+        setState(() {
+          _errorMessage = 'User data not found. Please log in again.';
+        });
       }
     } catch (e) {
       print('Error loading user data: $e');
       setState(() {
-        _errorMessage = 'Error loading user data. Please try again.';
+        _errorMessage = 'Failed to load user data: $e';
       });
     } finally {
       setState(() {
@@ -107,432 +226,366 @@ class _UpdateDetailsPageState extends State<UpdateDetailsPage> {
     }
   }
   
-  Future<void> _updateUserDetails() async {
-    // Reset messages
+  // Enhanced password validation method
+  String? _validatePassword(String? value) {
+    if (_isChangingPassword) {
+      if (value == null || value.isEmpty) {
+        return 'Password cannot be empty';
+      }
+      if (value.length < 8) {
+        return 'Password must be at least 8 characters long';
+      }
+      // Check for complexity
+      if (!RegExp(r'^(?=.*?[A-Z])(?=.*?[a-z])(?=.*?[0-9])(?=.*?[!@#\$&*~]).{8,}$')
+          .hasMatch(value)) {
+        return 'Password must include uppercase, lowercase, number, and special character';
+      }
+    }
+    return null;
+  }
+
+  // Comprehensive profile update method
+  Future<void> _updateProfile() async {
+    // Validate form before submission
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+
     setState(() {
+      _isLoading = true;
       _errorMessage = '';
       _successMessage = '';
     });
     
-    if (_formKey.currentState!.validate()) {
-      setState(() {
-        _isLoading = true;
-      });
-      
-      try {
-        final prefs = await SharedPreferences.getInstance();
-        
-        if (_email == null || _email!.isEmpty) {
+    try {
+      // Prepare update data with all fields
+      Map<String, dynamic> updateData = {
+        'name': _nameController.text.trim(),
+        'department': _selectedDepartment,
+        'course': _selectedCourse,
+        'year': 'Year $_selectedYear',
+        'semester': 'Semester $_selectedSemester',
+      };
+
+      // Check if password is being changed
+      if (_isChangingPassword) {
+        // Verify current password
+        bool isCurrentPasswordCorrect = await _supabaseService.verifyPassword(
+          email: _email!, 
+          password: _currentPasswordController.text
+        );
+
+        if (!isCurrentPasswordCorrect) {
           setState(() {
-            _errorMessage = 'User email is not available. Please log in again.';
+            _errorMessage = 'Current password is incorrect';
             _isLoading = false;
           });
           return;
         }
         
-        // Get existing user data
-        final userDataString = prefs.getString(_email!);
-        Map<String, dynamic> userData;
-        
-        if (userDataString != null) {
-          userData = json.decode(userDataString) as Map<String, dynamic>;
-        } else {
-          // If user data doesn't exist, create a new map with available data
-          userData = {
-            'email': _email!,
-            'registrationDate': DateTime.now().toIso8601String(),
-          };
+        // Update password in Supabase
+        final passwordResult = await _supabaseService.updatePassword(
+          email: _email!, 
+          newPassword: _passwordController.text
+        );
+
+        if (!passwordResult['success']) {
+          setState(() {
+            _errorMessage = passwordResult['message'] ?? 'Failed to update password';
+            _isLoading = false;
+          });
+          return;
         }
         
-        // Password verification and update
-        if (_isChangingPassword) {
-          // Verify current password
-          if (_currentPasswordController.text.trim() != _currentStoredPassword) {
-            setState(() {
-              _errorMessage = 'Current password is incorrect';
-              _isLoading = false;
-            });
-            return;
-          }
-          
-          // Verify new password is different from current
-          if (_passwordController.text.trim() == _currentStoredPassword) {
-            setState(() {
-              _errorMessage = 'New password must be different from current password';
-              _isLoading = false;
-            });
-            return;
-          }
-          
-          // Update password
-          userData['password'] = _passwordController.text.trim();
-          print('Password updated successfully');
+        // Add password to update data
+        updateData['password'] = _passwordController.text;
         }
         
-        // Update the user data with new values
-        userData['name'] = _nameController.text.trim();
-        userData['department'] = _selectedDepartment;
-        userData['course'] = _selectedCourse;
-        userData['year'] = _selectedYear;
-        userData['semester'] = _selectedSemester;
+      // Perform profile update in Supabase
+      final result = await _supabaseService.updateStudentProfile(
+        studentId: _studentId!, 
+        updateData: updateData
+      );
         
-        // Debug output
-        print('Updating user data: Name=${userData['name']}, Dept=${userData['department']}, Course=${userData['course']}, Year=${userData['year']}, Semester=${userData['semester']}');
+      if (result['success']) {
+        // Update local cache
+        _supabaseService.updateCurrentUserCache(updateData);
         
-        // Save the updated data to main user data store FIRST
-        // This is the primary source of truth
-        final jsonData = json.encode(userData);
-        await prefs.setString(_email!, jsonData);
-        print('Saved complete user data to main storage');
-        
-        // Then update the individual fields as backup
-        await prefs.setString('current_user_name', _nameController.text.trim());
-        await prefs.setString('current_user_department', _selectedDepartment ?? '');
-        await prefs.setString('current_user_course', _selectedCourse ?? '');
-        await prefs.setString('current_user_year', _selectedYear ?? '');
-        await prefs.setString('current_user_semester', _selectedSemester ?? '');
-        
-        await prefs.setString('user_name_$_email', _nameController.text.trim());
-        await prefs.setString('user_department_$_email', _selectedDepartment ?? '');
-        await prefs.setString('user_course_$_email', _selectedCourse ?? '');
-        await prefs.setString('user_year_$_email', _selectedYear ?? '');
-        await prefs.setString('user_semester_$_email', _selectedSemester ?? '');
-        
-        // Verify the data was saved correctly
-        final verifyData = prefs.getString(_email!);
-        if (verifyData != null) {
-          final verifiedUserData = json.decode(verifyData) as Map<String, dynamic>;
-          print('Verification - saved user data: Name=${verifiedUserData['name']}, Year=${verifiedUserData['year']}, Semester=${verifiedUserData['semester']}');
-        }
-        
+        print('Update successful, formatting data to pass back to dashboard');
+
         setState(() {
-          _successMessage = 'Profile updated successfully!';
+          _successMessage = 'Profile updated successfully';
           _isLoading = false;
-          // Clear password fields after successful update
-          _currentPasswordController.clear();
-          _passwordController.clear();
-          _confirmPasswordController.clear();
-          _isChangingPassword = false;
         });
+
+        // Ensure we pass back properly formatted data with consistent format
+        final updatedUserData = {
+          ...updateData,
+          'email': _email,
+          'student_id': _studentId,
+          // Make sure year and semester are correctly formatted
+          'year': _selectedYear, // Just the number without "Year " prefix
+          'semester': _selectedSemester, // Just the number without "Semester " prefix
+        };
         
-        // After successful update, wait a moment to show success message
-        // then log the user out to role selection page for effective refresh
-        Future.delayed(Duration(seconds: 2), () {
-          if (mounted) {
-            // Clear current login session (partial logout)
-            _clearCurrentLoginSession();
-            
-            // Show success message
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Profile updated. Please log in again with your updated details.'),
-                backgroundColor: Colors.green,
-                duration: Duration(seconds: 2),
-              ),
-            );
-            
-            // Navigate directly to role selection page
-            Navigator.pushNamedAndRemoveUntil(
-              context, 
-              '/role-selection', 
-              (route) => false, // Clear all routes in the stack
-            );
-          }
+        print('Returning to dashboard with updated name: ${updatedUserData['name']}');
+
+        // Navigate back to dashboard with updated data
+        Navigator.of(context).pop({
+          'updated': true,
+          'userData': updatedUserData
         });
-      } catch (e) {
-        print('Error updating user data: $e');
+      } else {
         setState(() {
-          _errorMessage = 'An error occurred while updating your profile. Please try again.';
+          // Check if the message is about no changes
+          if (result['message'] == 'No changes detected') {
+            _successMessage = 'No changes were made to your profile';
+          } else {
+            _errorMessage = result['message'] ?? 'Failed to update profile';
+          }
           _isLoading = false;
         });
       }
+    } catch (e) {
+      setState(() {
+        _errorMessage = 'An error occurred: ${e.toString()}';
+        _isLoading = false;
+      });
+      print('Error in profile update: $e');
     }
   }
-  
-  // Method to clear current login session data
-  Future<void> _clearCurrentLoginSession() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      
-      // Only clear session data, not user profile data
-      await prefs.remove('isLoggedIn');
-      await prefs.remove('current_user_email');
-      await prefs.remove('currentUser');
-      
-      // Clear any dashboard-specific temporary data
-      await prefs.remove('current_profile_loaded');
-      await prefs.remove('current_timetable_loaded');
-      
-      print('Current login session cleared after profile update');
-    } catch (e) {
-      print('Error clearing current login session: $e');
+
+  // Build password change section
+  Widget _buildPasswordChangeSection() {
+    if (!_isChangingPassword) {
+      return SizedBox.shrink();
     }
+
+    return Column(
+      children: [
+        TextFormField(
+          controller: _currentPasswordController,
+          decoration: InputDecoration(
+            labelText: 'Current Password',
+            prefixIcon: Icon(Icons.lock_outline),
+            suffixIcon: IconButton(
+              icon: Icon(_obscureCurrentPassword 
+                  ? Icons.visibility 
+                  : Icons.visibility_off),
+              onPressed: () {
+                setState(() {
+                  _obscureCurrentPassword = !_obscureCurrentPassword;
+                });
+              },
+            ),
+          ),
+          obscureText: _obscureCurrentPassword,
+          validator: (value) {
+            if (_isChangingPassword && (value == null || value.isEmpty)) {
+              return 'Please enter your current password';
+            }
+            return null;
+          },
+        ),
+        SizedBox(height: 16),
+        TextFormField(
+          controller: _passwordController,
+          decoration: InputDecoration(
+            labelText: 'New Password',
+            prefixIcon: Icon(Icons.lock_outline),
+            suffixIcon: IconButton(
+              icon: Icon(_obscurePassword 
+                  ? Icons.visibility 
+                  : Icons.visibility_off),
+              onPressed: () {
+                setState(() {
+                  _obscurePassword = !_obscurePassword;
+                });
+              },
+            ),
+          ),
+          obscureText: _obscurePassword,
+          validator: _validatePassword,
+        ),
+        SizedBox(height: 16),
+        TextFormField(
+          controller: _confirmPasswordController,
+          decoration: InputDecoration(
+            labelText: 'Confirm New Password',
+            prefixIcon: Icon(Icons.lock_outline),
+            suffixIcon: IconButton(
+              icon: Icon(_obscureConfirmPassword 
+                  ? Icons.visibility 
+                  : Icons.visibility_off),
+              onPressed: () {
+                setState(() {
+                  _obscureConfirmPassword = !_obscureConfirmPassword;
+                });
+              },
+            ),
+          ),
+          obscureText: _obscureConfirmPassword,
+          validator: (value) {
+            if (_isChangingPassword) {
+              if (value != _passwordController.text) {
+                return 'Passwords do not match';
+              }
+            }
+            return null;
+          },
+        ),
+      ],
+    );
   }
   
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('Update Details'),
+        title: Text('Update Profile'),
         backgroundColor: Colors.blue,
-        foregroundColor: Colors.white,
       ),
-      body: Container(
-        color: Colors.white,
-        child: _isLoading 
-          ? Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              child: Padding(
-                padding: EdgeInsets.all(16),
-                child: Card(
-                  elevation: 4,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(15),
-                  ),
+      body: SingleChildScrollView(
                   child: Padding(
-                    padding: EdgeInsets.all(16),
+          padding: const EdgeInsets.all(16.0),
                     child: Form(
                       key: _formKey,
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          Text(
-                            'Update Your Profile',
-                            style: TextStyle(
-                              fontSize: 24,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.blue,
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
-                          SizedBox(height: 16),
-                          // Success message
-                          if (_successMessage.isNotEmpty)
-                            Container(
-                              padding: EdgeInsets.all(10),
-                              margin: EdgeInsets.only(bottom: 15),
-                              decoration: BoxDecoration(
-                                color: Colors.green.shade50,
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: Colors.green.shade200),
-                              ),
-                              child: Row(
-                                children: [
-                                  Icon(Icons.check_circle, color: Colors.green),
-                                  SizedBox(width: 10),
-                                  Expanded(
-                                    child: Text(
-                                      _successMessage,
-                                      style: TextStyle(color: Colors.green),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          // Error message
-                          if (_errorMessage.isNotEmpty)
-                            Container(
-                              padding: EdgeInsets.all(10),
-                              margin: EdgeInsets.only(bottom: 15),
-                              decoration: BoxDecoration(
-                                color: Colors.red.shade50,
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: Colors.red.shade200),
-                              ),
-                              child: Row(
-                                children: [
-                                  Icon(Icons.error_outline, color: Colors.red),
-                                  SizedBox(width: 10),
-                                  Expanded(
-                                    child: Text(
-                                      _errorMessage,
-                                      style: TextStyle(color: Colors.red),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          // Email field (disabled)
-                          TextFormField(
-                            initialValue: _email,
-                            enabled: false, // Disable email editing
-                            decoration: InputDecoration(
-                              labelText: 'Email',
-                              hintText: 'Your email cannot be changed',
-                              prefixIcon: Icon(Icons.email),
-                              filled: true,
-                              fillColor: Colors.grey.shade200,
-                            ),
-                          ),
-                          SizedBox(height: 16),
-                          // Name field with auto capitalize
+                // Existing form fields for name, department, course, etc.
                           TextFormField(
                             controller: _nameController,
                             decoration: InputDecoration(
                               labelText: 'Full Name',
                               prefixIcon: Icon(Icons.person),
-                              hintText: 'Enter your full name',
                             ),
-                            textCapitalization: TextCapitalization.words,
-                            onChanged: (value) {
-                              if (value.isNotEmpty) {
-                                // Auto-capitalize first letter of each word
-                                final words = value.split(' ');
-                                final capitalizedWords = words.map((word) {
-                                  if (word.isEmpty) return '';
-                                  return word[0].toUpperCase() + (word.length > 1 ? word.substring(1).toLowerCase() : '');
-                                }).join(' ');
-                                
-                                if (value != capitalizedWords) {
-                                  _nameController.value = TextEditingValue(
-                                    text: capitalizedWords,
-                                    selection: TextSelection.collapsed(offset: capitalizedWords.length),
-                                  );
-                                }
-                              }
-                            },
                             validator: (value) {
-                              if (value == null || value.isEmpty) {
+                    if (value == null || value.trim().isEmpty) {
                                 return 'Please enter your full name';
-                              }
-                              if (RegExp(r'[0-9]').hasMatch(value)) {
-                                return 'Name cannot contain numbers';
-                              }
-                              // Check if it has at least first and last name
-                              final nameParts = value.trim().split(' ');
-                              if (nameParts.length < 2 || nameParts.any((part) => part.isEmpty)) {
-                                return 'Please enter both first and last name';
                               }
                               return null;
                             },
                           ),
-                          SizedBox(height: 16),
-                          // Department dropdown
+                SizedBox(height: 16),
+
+                // Department Dropdown
                           DropdownButtonFormField<String>(
                             value: _selectedDepartment,
                             decoration: InputDecoration(
                               labelText: 'Department',
-                              prefixIcon: Icon(Icons.business),
-                              border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.school),
                             ),
-                            items: [
-                              for (final department in _departmentCourses.keys)
-                                DropdownMenuItem(
-                                  value: department,
-                                  child: Text(department),
-                                ),
-                            ],
-                            onChanged: (value) {
+                  items: _departmentCourses.keys
+                      .map((dept) => DropdownMenuItem(
+                            value: dept,
+                            child: Text(dept),
+                          ))
+                      .toList(),
+                  onChanged: (value) {
                               setState(() {
-                                _selectedDepartment = value;
-                                // Reset course if department changes
-                                _selectedCourse = null;
+                      _selectedDepartment = value;
+                      _selectedCourse = null; // Reset course when department changes
                               });
                             },
                             validator: (value) {
-                              if (value == null || value.isEmpty) {
+                    if (value == null) {
                                 return 'Please select a department';
                               }
                               return null;
                             },
                           ),
-                          SizedBox(height: 16),
-                          // Course dropdown
+                SizedBox(height: 16),
+
+                // Course Dropdown
                           DropdownButtonFormField<String>(
                             value: _selectedCourse,
                             decoration: InputDecoration(
                               labelText: 'Course',
-                              prefixIcon: Icon(Icons.school),
-                              border: OutlineInputBorder(),
-                            ),
-                            items: [
-                              for (final course in _getCourses())
-                                DropdownMenuItem(
-                                  value: course,
-                                  child: Text(course),
-                                ),
-                            ],
-                            onChanged: (value) {
+                    prefixIcon: Icon(Icons.book),
+                              ),
+                  items: _getCourses()
+                      .map((course) => DropdownMenuItem(
+                                value: course,
+                                child: Text(course),
+                          ))
+                      .toList(),
+                  onChanged: (value) {
                               setState(() {
-                                _selectedCourse = value;
+                      _selectedCourse = value;
                               });
                             },
                             validator: (value) {
-                              if (value == null || value.isEmpty) {
+                    if (value == null) {
                                 return 'Please select a course';
                               }
                               return null;
                             },
                           ),
-                          SizedBox(height: 16),
-                          // Year of study dropdown
+                SizedBox(height: 16),
+
+                // Year Dropdown
                           DropdownButtonFormField<String>(
                             value: _selectedYear,
                             decoration: InputDecoration(
                               labelText: 'Year of Study',
                               prefixIcon: Icon(Icons.calendar_today),
-                              border: OutlineInputBorder(),
-                            ),
-                            items: [
-                              for (final year in _years)
-                                DropdownMenuItem(
-                                  value: year,
-                                  child: Text('Year $year'),
-                                ),
-                            ],
-                            onChanged: (value) {
+                              ),
+                  items: _years
+                      .map((year) => DropdownMenuItem(
+                                value: year,
+                                child: Text('Year $year'),
+                          ))
+                      .toList(),
+                  onChanged: (value) {
                               setState(() {
-                                _selectedYear = value;
+                      _selectedYear = value;
                               });
                             },
                             validator: (value) {
-                              if (value == null || value.isEmpty) {
-                                return 'Please select your year of study';
+                    if (value == null) {
+                      return 'Please select year of study';
                               }
                               return null;
                             },
                           ),
-                          SizedBox(height: 16),
-                          // Semester dropdown
+                SizedBox(height: 16),
+
+                // Semester Dropdown
                           DropdownButtonFormField<String>(
                             value: _selectedSemester,
                             decoration: InputDecoration(
                               labelText: 'Semester',
-                              prefixIcon: Icon(Icons.event),
-                              border: OutlineInputBorder(),
-                            ),
-                            items: [
-                              for (final semester in _semesters)
-                                DropdownMenuItem(
-                                  value: semester,
-                                  child: Text('Semester $semester'),
-                                ),
-                            ],
-                            onChanged: (value) {
+                    prefixIcon: Icon(Icons.calendar_month),
+                              ),
+                  items: _semesters
+                      .map((semester) => DropdownMenuItem(
+                                value: semester,
+                                child: Text('Semester $semester'),
+                          ))
+                      .toList(),
+                  onChanged: (value) {
                               setState(() {
-                                _selectedSemester = value;
+                      _selectedSemester = value;
                               });
                             },
                             validator: (value) {
-                              if (value == null || value.isEmpty) {
-                                return 'Please select your semester';
+                    if (value == null) {
+                      return 'Please select semester';
                               }
                               return null;
                             },
                           ),
-                          SizedBox(height: 16),
-                          
-                          // Password Update Toggle
+                SizedBox(height: 16),
+
+                // Password Change Toggle
                           SwitchListTile(
-                            title: Text(
-                              'Change Password',
-                              style: TextStyle(fontWeight: FontWeight.w500),
-                            ),
+                            title: Text('Change Password'),
                             value: _isChangingPassword,
-                            onChanged: (value) {
+                  onChanged: (bool value) {
                               setState(() {
                                 _isChangingPassword = value;
-                                // Clear password fields when toggling
+                      // Reset password fields when toggling
                                 if (!value) {
                                   _currentPasswordController.clear();
                                   _passwordController.clear();
@@ -540,139 +593,56 @@ class _UpdateDetailsPageState extends State<UpdateDetailsPage> {
                                 }
                               });
                             },
-                            activeColor: Colors.blue,
                           ),
-                          
-                          if (_isChangingPassword) ...[
-                            SizedBox(height: 16),
-                            // Current Password field
-                            TextFormField(
-                              controller: _currentPasswordController,
-                              decoration: InputDecoration(
-                                labelText: 'Current Password',
-                                prefixIcon: Icon(Icons.lock_outline),
-                                suffixIcon: IconButton(
-                                  icon: Icon(
-                                    _obscureCurrentPassword ? Icons.visibility : Icons.visibility_off,
-                                  ),
-                                  onPressed: () {
-                                    setState(() {
-                                      _obscureCurrentPassword = !_obscureCurrentPassword;
-                                    });
-                                  },
+
+                // Conditional Password Change Section
+                _buildPasswordChangeSection(),
+
+                // Error Message Display
+                if (_errorMessage.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8.0),
+                    child: Text(
+                      _errorMessage,
+                      style: TextStyle(color: Colors.red),
+                      textAlign: TextAlign.center,
                                 ),
                               ),
-                              obscureText: _obscureCurrentPassword,
-                              validator: (value) {
-                                if (_isChangingPassword) {
-                                  if (value == null || value.isEmpty) {
-                                    return 'Please enter your current password';
-                                  }
-                                }
-                                return null;
-                              },
+
+                // Success Message Display
+                if (_successMessage.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8.0),
+                    child: Text(
+                      _successMessage,
+                      style: TextStyle(color: Colors.green),
+                      textAlign: TextAlign.center,
                             ),
-                            SizedBox(height: 16),
-                            // New Password field
-                            TextFormField(
-                              controller: _passwordController,
-                              decoration: InputDecoration(
-                                labelText: 'New Password',
-                                prefixIcon: Icon(Icons.lock),
-                                suffixIcon: IconButton(
-                                  icon: Icon(
-                                    _obscurePassword ? Icons.visibility : Icons.visibility_off,
-                                  ),
-                                  onPressed: () {
-                                    setState(() {
-                                      _obscurePassword = !_obscurePassword;
-                                    });
-                                  },
-                                ),
-                              ),
-                              obscureText: _obscurePassword,
-                              validator: (value) {
-                                if (_isChangingPassword) {
-                                  if (value == null || value.isEmpty) {
-                                    return 'Please enter a new password';
-                                  }
-                                  if (value.length < 8) {
-                                    return 'Password must be at least 8 characters';
-                                  }
-                                  if (value == _currentPasswordController.text) {
-                                    return 'New password must be different from current password';
-                                  }
-                                }
-                                return null;
-                              },
-                            ),
-                            SizedBox(height: 16),
-                            // Confirm password field
-                            TextFormField(
-                              controller: _confirmPasswordController,
-                              decoration: InputDecoration(
-                                labelText: 'Confirm New Password',
-                                prefixIcon: Icon(Icons.lock_outline),
-                                suffixIcon: IconButton(
-                                  icon: Icon(
-                                    _obscureConfirmPassword ? Icons.visibility : Icons.visibility_off,
-                                  ),
-                                  onPressed: () {
-                                    setState(() {
-                                      _obscureConfirmPassword = !_obscureConfirmPassword;
-                                    });
-                                  },
-                                ),
-                              ),
-                              obscureText: _obscureConfirmPassword,
-                              validator: (value) {
-                                if (_isChangingPassword) {
-                                  if (value == null || value.isEmpty) {
-                                    return 'Please confirm your new password';
-                                  }
-                                  if (value != _passwordController.text) {
-                                    return 'Passwords do not match';
-                                  }
-                                }
-                                return null;
-                              },
-                            ),
-                          ],
-                          SizedBox(height: 24),
-                          // Update button
+                  ),
+
+                // Update Profile Button
                           ElevatedButton(
-                            onPressed: _updateUserDetails,
+                  onPressed: _isLoading ? null : _updateProfile,
                             style: ElevatedButton.styleFrom(
                               backgroundColor: Colors.blue,
-                              foregroundColor: Colors.white,
-                              padding: EdgeInsets.symmetric(vertical: 15),
-                              textStyle: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                              ),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(10),
-                              ),
+                    padding: EdgeInsets.symmetric(vertical: 16),
                             ),
-                            child: Text('Update Profile'),
+                            child: _isLoading
+                      ? CircularProgressIndicator(color: Colors.white)
+                                : Text(
+                                    'Update Profile',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    ),
+                                  ),
                           ),
                         ],
-                      ),
-                    ),
                   ),
                 ),
               ),
             ),
-      ),
     );
-  }
-  
-  @override
-  void dispose() {
-    _nameController.dispose();
-    _currentPasswordController.dispose();
-    _passwordController.dispose();
-    _confirmPasswordController.dispose();
-    super.dispose();
   }
 } 

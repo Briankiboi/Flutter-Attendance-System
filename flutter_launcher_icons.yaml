@@ -1,0 +1,6 @@
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/Attedance (1).png"
+  min_sdk_android: 21 # android min sdk min:16, default 21
+  remove_alpha_ios: true 

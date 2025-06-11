@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:qr_attendance/routes/app_routes.dart';
 
 class RoleSelectionScreen extends StatelessWidget {
+  const RoleSelectionScreen({super.key});
+
   @override
   Widget build(BuildContext context) {
     // Get screen width to make circles responsive
@@ -23,7 +25,7 @@ class RoleSelectionScreen extends StatelessWidget {
               SizedBox(height: 40),
               // App Title
               Text(
-                'QR Attendance ',
+                'Attendance App',
                 style: TextStyle(
                   fontSize: 32,
                   fontWeight: FontWeight.bold,
@@ -33,7 +35,7 @@ class RoleSelectionScreen extends StatelessWidget {
               ),
               SizedBox(height: 10),
               Text(
-                ' Tharaka university App',
+                ' Hello user 👋❤️',
                 style: TextStyle(
                   fontSize: 16,
                   color: Colors.blue.shade600,
@@ -70,7 +72,7 @@ class RoleSelectionScreen extends StatelessWidget {
               Padding(
                 padding: EdgeInsets.only(bottom: 20),
                 child: Text(
-                  '© 2025  Ict dept (Brian_Kiboi solutions)',
+                  '© 2025  "All rights reserved" ',
                   style: TextStyle(
                     color: Colors.blue.shade800.withOpacity(0.7),
                     fontSize: 12,

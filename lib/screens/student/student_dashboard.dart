@@ -1,15 +1,23 @@
 import 'package:flutter/material.dart';
 import 'dart:io';
 import 'dart:async';
+import 'dart:math';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'dart:convert';
 import 'dart:async';
 import 'package:path_provider/path_provider.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:qr_attendance/screens/student/scan_qr_page.dart';
+import 'package:qr_attendance/screens/student/student_timetable_page.dart';
+import 'package:qr_attendance/screens/student/update_details_page.dart';
+import 'package:qr_attendance/screens/student/view_page.dart';
+import 'package:qr_attendance/services/supabase_service.dart';
 
 class StudentDashboard extends StatefulWidget {
-  const StudentDashboard({Key? key}) : super(key: key);
+  const StudentDashboard({super.key});
 
   @override
   State<StudentDashboard> createState() => _StudentDashboardState();
@@ -23,8 +31,13 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
   String? _year;
   String? _semester;
   
+  // Add loading state
+  bool _isLoading = true;
+  
   // Profile picture variables
   File? _profileImage;
+  String? _profileImagePath;
+  bool _isAvatarLoading = false;
   
   // Internet connectivity tracking
   bool _isOnline = true;
@@ -38,79 +51,94 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
   Timer? _qrCheckTimer;
   
   // New notification state
-  bool _hasNewNotifications = false; // Default to false - no notifications
+  bool _hasNewNotifications = false;
 
-  // Current time and date variables
-  String _currentTime = "";
-  String _currentDate = "";
-  Timer? _clockTimer;
+  // Location variables
+  String _currentLocation = "Fetching location...";
+  Position? _currentPosition;
+  bool _locationServiceEnabled = false;
+  LocationPermission? _permissionStatus;
+
+  // Service for Supabase
+  final _supabaseService = SupabaseService();
 
   @override
   void initState() {
     super.initState();
-    
-    // Register this object as an observer for app lifecycle events
     WidgetsBinding.instance.addObserver(this);
-    
-    // Always load user data from SharedPreferences on startup
     _loadUserData();
-    _loadProfileImage();
+    _setupConnectivityListener();
     _loadDarkModePreference();
-    _checkForNewQRCode();
-    _checkForNewNotifications();
-    
-    // Initialize connectivity status
-    _checkConnectivity();
-    
-    // Setup connectivity listener to update status in real-time
-    _connectivitySubscription = Connectivity().onConnectivityChanged.listen((ConnectivityResult result) {
-      _updateConnectionStatus(result);
-    });
-    
-    // Periodically check for new QR codes
-    _qrCheckTimer = Timer.periodic(Duration(seconds: 30), (timer) {
-      if (mounted) {
-        _checkForNewQRCode();
-        _checkForNewNotifications();
-      }
-    });
-
-    // Initialize time and date
-    _updateTime();
-    
-    // Setup timer to update time every second
-    _clockTimer = Timer.periodic(Duration(seconds: 1), (timer) {
-      if (mounted) {
-        _updateTime();
-      }
-    });
+    _checkLocationPermission();
+    _startQRCheckTimer();
+    _loadProfileImage();
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    super.didChangeAppLifecycleState(state);
-    // When app resumes from background, refresh all data
-    if (state == AppLifecycleState.resumed) {
-      _refreshAllData();
-    }
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _connectivitySubscription.cancel();
+    _qrCheckTimer?.cancel();
+    super.dispose();
   }
 
   void _refreshAllData() {
     if (mounted) {
       print('Refreshing all dashboard data...');
-      _loadUserData();
-      _loadProfileImage();
-      _checkForNewQRCode();
-      _checkForNewNotifications();
+      
+      setState(() {
+        _isLoading = true;  // Set loading state while refreshing
+      });
+      
+      // First get the latest data directly from database
+      _supabaseService.refreshUserData().then((freshData) {
+        if (freshData != null) {
+          // Format year and semester consistently
+          final formattedYear = _formatYear(freshData['year']?.toString());
+          final formattedSemester = _formatSemester(freshData['semester']?.toString());
+          
+          // Update state with fresh data
+          if (mounted) {
+          setState(() {
+              _isLoading = false;  // Clear loading state
+              _email = freshData['email'];
+              _studentName = freshData['name'];
+              _department = freshData['department'];
+              _course = freshData['course'];
+              _year = formattedYear;
+              _semester = formattedSemester;
+          });
+            print('Updated UI from refreshed database data: Department=$_department, Course=$_course, Year=$_year, Semester=$_semester');
+          }
+        } else {
+          // If no fresh data, load from cache
+        _loadUserData();
+        }
+        
+        // Load related data
+        _loadProfileImage();
+        _checkForNewQRCode();
+        _checkForNewNotifications();
+      }).catchError((error) {
+        print('Error refreshing user data: $error');
+        if (mounted) {
+          setState(() {
+            _isLoading = false;  // Clear loading state on error
+          });
+        // Still try to reload from memory cache
+        _loadUserData();
+        _loadProfileImage();
+        }
+      });
     }
   }
 
   // Load dark mode preference
   Future<void> _loadDarkModePreference() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final isDarkMode = await _supabaseService.getDarkModeEnabled();
       setState(() {
-        _isDarkMode = prefs.getBool('dark_mode_enabled') ?? false;
+        _isDarkMode = isDarkMode;
       });
     } catch (e) {
       print('Error loading dark mode preference: $e');
@@ -120,8 +148,10 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
   // Save dark mode preference
   Future<void> _saveDarkModePreference(bool value) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool('dark_mode_enabled', value);
+      await _supabaseService.setDarkModeEnabled(value);
+      setState(() {
+        _isDarkMode = value;
+      });
     } catch (e) {
       print('Error saving dark mode preference: $e');
     }
@@ -130,245 +160,308 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    
+    // Get data from navigation arguments if available
     final args = ModalRoute.of(context)?.settings.arguments;
     if (args is Map<String, dynamic>) {
       setState(() {
-        _email = args['email'];
-        _studentName = args['name'];
-        _department = args['department'];
-        _course = args['course'];
-        _year = args['year']; 
-        _semester = args['semester'];
+        _isLoading = true; // Set loading state while processing args
       });
       
-      // Store this data in SharedPreferences to make sure it's available
-      _saveCurrentUserData(args);
+      // Store values received from login or other screens
+      if (args.containsKey('userData') && args['userData'] != null) {
+        final userData = args['userData'] as Map<String, dynamic>;
+        
+        // Update Supabase service cache first
+        _supabaseService.updateCurrentUserCache(userData);
+        
+        // Format year and semester consistently
+        final formattedYear = _formatYear(userData['year']?.toString());
+        final formattedSemester = _formatSemester(userData['semester']?.toString());
+        
+        setState(() {
+          _email = userData['email'];
+          _studentName = userData['name'];
+          _department = userData['department'];
+          _course = userData['course'];
+          _year = formattedYear;
+          _semester = formattedSemester;
+          _isLoading = false;
+        });
+        
+        print('Applied data from navigation: Department=$_department, Course=$_course, Year=$_year, Semester=$_semester');
+        
+        // Immediately try to get location
+        _initializeLocationImmediate();
+        
+        // Make sure data is saved to Supabase service
+        if (args.containsKey('refreshData') && args['refreshData'] == true) {
+          _refreshAllData(); // This will handle loading state
+        }
+      } else {
+        // If just email and name provided
+        setState(() {
+          _email = args['email'];
+          _studentName = args['name'];
+          if (args.containsKey('department')) _department = args['department'];
+          if (args.containsKey('course')) _course = args['course'];
+          if (args.containsKey('year')) _year = _formatYear(args['year']);
+          if (args.containsKey('semester')) _semester = _formatSemester(args['semester']);
+          _isLoading = false;
+        });
+        
+        // Try to get location
+        _initializeLocationImmediate();
+      }
       
-      // Reload profile image in case it was updated
-      _loadProfileImage();
+      // If returning from update profile with confirmation
+      if (args.containsKey('updated') && args['updated'] == true) {
+        setState(() {
+          _isLoading = true; // Set loading state for update
+        });
+        
+        // If updated data is directly provided, use it immediately for faster UI update
+        if (args.containsKey('userData') && args['userData'] != null) {
+          final updatedData = args['userData'] as Map<String, dynamic>;
+          
+          // Update Supabase service cache first
+          _supabaseService.updateCurrentUserCache(updatedData);
+          
+          // Format year and semester consistently
+          final formattedYear = _formatYear(updatedData['year']?.toString());
+          final formattedSemester = _formatSemester(updatedData['semester']?.toString());
+          
+          setState(() {
+            _email = updatedData['email'];
+            _studentName = updatedData['name'];
+            _department = updatedData['department'];
+            _course = updatedData['course'];
+            _year = formattedYear;
+            _semester = formattedSemester;
+          });
+          print('Applied immediate UI update with returned data: Name=$_studentName, Department=$_department, Course=$_course, Year=$_year, Semester=$_semester');
+        }
+        
+        // Force full data refresh from server
+        _supabaseService.refreshUserData().then((_) {
+          // After server refresh, update the UI again with the latest data
+          _loadUserData();
+          _loadProfileImage();
+          
+          // Try to get location again
+          _initializeLocationImmediate();
+          
+          print('Completed server refresh after profile update');
+          
+          if (mounted) {
+            setState(() {
+              _isLoading = false;
+            });
+          }
+        }).catchError((error) {
+          print('Error during server refresh: $error');
+          // Still load cached data
+          _loadUserData();
+          
+          // Try to get location
+          _initializeLocationImmediate();
+          
+          if (mounted) {
+            setState(() {
+              _isLoading = false;
+            });
+          }
+        });
+        
+        // Show a confirmation toast
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Profile updated successfully'),
+              backgroundColor: Colors.green,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        });
+      } else {
+        // Always reload profile image after navigation
+        _loadProfileImage();
+      }
     } else {
-      // Even if no args were provided, refresh data from SharedPreferences
-      // This ensures dashboard is updated after returning from update details
-      _loadUserData();
-      _loadProfileImage();
-    }
-  }
-
-  Future<void> _saveCurrentUserData(Map<String, dynamic> userData) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final email = userData['email'] ?? '';
+      // Even if no args were provided, refresh all data
+      // This ensures dashboard is updated after returning from other screens
+      _refreshAllData(); // This will handle loading state
       
-      // Save the data tied to the specific user
-      await prefs.setString('current_user_email', email);
-      await prefs.setString('user_name_$email', userData['name'] ?? '');
-      await prefs.setString('user_department_$email', userData['department'] ?? '');
-      await prefs.setString('user_course_$email', userData['course'] ?? '');
-      await prefs.setString('user_year_$email', userData['year'] ?? '');
-      await prefs.setString('user_semester_$email', userData['semester'] ?? '');
-      
-      // Also save as the current user
-      await prefs.setString('current_user_email', email);
-      await prefs.setString('current_user_name', userData['name'] ?? '');
-      await prefs.setString('current_user_department', userData['department'] ?? '');
-      await prefs.setString('current_user_course', userData['course'] ?? '');
-      await prefs.setString('current_user_year', userData['year'] ?? '');
-      await prefs.setString('current_user_semester', userData['semester'] ?? '');
-    } catch (e) {
-      print('Error saving user data: $e');
+      // Try to get location
+      _initializeLocationImmediate();
     }
   }
 
   Future<void> _loadUserData() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final email = prefs.getString('current_user_email');
+      // Get current user data from Supabase service
+      final userData = _supabaseService.getCurrentUser();
       
-      if (email != null && email.isNotEmpty) {
-        // Get the full user data from the main data store
-        final userDataString = prefs.getString(email);
+      if (userData != null && mounted) {
+        // Format year and semester consistently
+        final formattedYear = _formatYear(userData['year']?.toString());
+        final formattedSemester = _formatSemester(userData['semester']?.toString());
         
-        if (userDataString != null) {
-          // If we have the complete user data, use it
-          final userData = json.decode(userDataString) as Map<String, dynamic>;
-          setState(() {
-            _email = email;
-            _studentName = userData['name'];
-            _department = userData['department'];
-            _course = userData['course'];
-            _year = userData['year'];
-            _semester = userData['semester'];
+        setState(() {
+          _email = userData['email'];
+          _studentName = userData['name'];
+          _department = userData['department'];
+          _course = userData['course'];
+          _year = formattedYear;
+          _semester = formattedSemester;
+          _isLoading = false;  // Ensure loading state is cleared
+        });
+        
+        print('Loaded user data for dashboard: Name=$_studentName, Department=$_department, Course=$_course, Year=$_year, Semester=$_semester');
+        
+        // Check if we need to sync profile image with database
+        if (userData.containsKey('email') && userData['email'] != null) {
+          String? studentId = userData['student_id'];
+          String email = userData['email'];
+          
+          // Trigger profile image sync in the background
+          _supabaseService.syncProfileImageWithDatabase(email, studentId).then((imageUrl) {
+            if (imageUrl != null && imageUrl.isNotEmpty && mounted) {
+              print('Synced profile image URL from storage: $imageUrl');
+                setState(() {
+                  if (imageUrl.startsWith('http')) {
+                    _profileImagePath = imageUrl;
+                    _profileImage = null;
+                  }
+                });
+              
+              // Update in-memory cache
+              _supabaseService.updateCurrentUserCache({
+                'profile_image_path': imageUrl
+              });
+            }
           });
-          print('Loaded complete user data for dashboard: Name=$_studentName, Year=$_year, Semester=$_semester');
+        }
+        
+        // Always check for profile image when loading user data
+        if (userData.containsKey('profile_image_path') && 
+            userData['profile_image_path'] != null && 
+            userData['profile_image_path'].toString().isNotEmpty) {
+          setState(() {
+            if (userData['profile_image_path'].toString().startsWith('http')) {
+              _profileImagePath = userData['profile_image_path'];
+              _profileImage = null;
+            }
+          });
         } else {
-          // Fall back to the individual preference keys
-          setState(() {
-            _email = email;
-            _studentName = prefs.getString('user_name_$email') ?? prefs.getString('current_user_name');
-            _department = prefs.getString('user_department_$email') ?? prefs.getString('current_user_department');
-            _course = prefs.getString('user_course_$email') ?? prefs.getString('current_user_course');
-            _year = prefs.getString('user_year_$email') ?? prefs.getString('current_user_year');
-            _semester = prefs.getString('user_semester_$email') ?? prefs.getString('current_user_semester');
-          });
-          print('Loaded backup user data for dashboard: Name=$_studentName, Year=$_year, Semester=$_semester');
+          // If no profile image in cached data, try to fetch from Supabase
+          _loadProfileImage();
         }
       } else {
-        setState(() {
-          _email = prefs.getString('current_user_email');
-          _studentName = prefs.getString('current_user_name');
-          _department = prefs.getString('current_user_department');
-          _course = prefs.getString('current_user_course');
-          _year = prefs.getString('current_user_year');
-          _semester = prefs.getString('current_user_semester');
-        });
-        print('Loaded fallback user data for dashboard: Name=$_studentName');
+        print('No user data available - user not logged in');
+        if (mounted) {
+          setState(() {
+            _isLoading = false;  // Ensure loading state is cleared even when no data
+          });
+        }
       }
     } catch (e) {
       print('Error loading user data: $e');
+      if (mounted) {
+        setState(() {
+          _isLoading = false;  // Ensure loading state is cleared on error
+        });
+      }
     }
   }
 
-  // Load profile image
+  // Load profile image with proper URL handling
   Future<void> _loadProfileImage() async {
+    setState(() {
+      _isAvatarLoading = true;
+    });
+    
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final userEmail = _email ?? prefs.getString('current_user_email');
+      final userData = _supabaseService.getCurrentUser();
+      if (userData == null) {
+        setState(() {
+          _profileImage = null;
+          _profileImagePath = null;
+          _isAvatarLoading = false;
+        });
+        return;
+      }
+
+      String? imagePath = userData['profile_image_path'];
       
-      if (userEmail != null) {
-        final imagePath = prefs.getString('profile_image_path_$userEmail');
+      if (imagePath != null && imagePath.isNotEmpty) {
+        print('Loading profile image from path: $imagePath');
         
-        // Ensure we're only loading the image for the current user email
-        if (imagePath != null && userEmail == _email) {
-          final file = File(imagePath);
-          if (await file.exists()) {
+        // Clear existing image cache to ensure we load the latest version
+        PaintingBinding.instance.imageCache.clear();
+        PaintingBinding.instance.imageCache.clearLiveImages();
+        
+        setState(() {
+          _profileImage = null;
+          _profileImagePath = imagePath;
+          _isAvatarLoading = false;
+        });
+        
+        // Also refresh the image URL in the database to ensure it's current
+        _supabaseService.syncProfileImageWithDatabase(
+          userData['email'],
+          userData['student_id']
+        ).then((updatedUrl) {
+          if (updatedUrl != null && updatedUrl != imagePath) {
             setState(() {
-              _profileImage = file;
-            });
-            print('Loaded profile image from: $imagePath for $userEmail');
-          } else {
-            print('Profile image file does not exist: $imagePath');
-            setState(() {
-              _profileImage = null; // Clear any existing image
+              _profileImagePath = updatedUrl;
             });
           }
-        } else {
-          print('No profile image path found for user: $userEmail');
-          setState(() {
-            _profileImage = null; // Clear any existing image
-          });
-        }
+        });
       } else {
-        print('Cannot load profile image: user email is null');
+        print('No profile image path found');
         setState(() {
-          _profileImage = null; // Clear any existing image
+          _profileImage = null;
+          _profileImagePath = null;
+          _isAvatarLoading = false;
         });
       }
     } catch (e) {
       print('Error loading profile image: $e');
       setState(() {
-        _profileImage = null; // Clear any existing image on error
+        _profileImage = null;
+        _profileImagePath = null;
+        _isAvatarLoading = false;
       });
     }
   }
 
-  // Save profile image
-  Future<void> _saveProfileImagePath(String path) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final userEmail = _email ?? prefs.getString('current_user_email');
-      
-      if (userEmail != null) {
-        await prefs.setString('profile_image_path_$userEmail', path);
-        print('Saved profile image path for $userEmail: $path');
-      } else {
-        print('Cannot save profile image path: user email is null');
+  // Schedule refresh of signed URL before expiry
+  Timer? _imageRefreshTimer;
+  
+  void _scheduleImageUrlRefresh() {
+    _imageRefreshTimer?.cancel();
+    // Refresh URL 5 minutes before expiry (3600 - 300 = 3300 seconds)
+    _imageRefreshTimer = Timer(Duration(seconds: 3300), () {
+      if (mounted) {
+        _loadProfileImage();
       }
-    } catch (e) {
-      print('Error saving profile image path: $e');
-    }
+    });
   }
 
-  // Pick and update profile image
-  Future<void> _pickProfileImage() async {
+  // Save profile image
+  Future<void> _saveProfileImage(File imageFile) async {
     try {
-      final picker = ImagePicker();
-      final pickedFile = await picker.pickImage(
-        source: ImageSource.gallery,
-        imageQuality: 80 // Compress for better performance
-      );
+      final result = await _supabaseService.uploadProfileImage(imageFile);
       
-      if (pickedFile != null) {
-        // Get the current user email to ensure we're saving to the right profile
-        final prefs = await SharedPreferences.getInstance();
-        final userEmail = _email ?? prefs.getString('current_user_email');
-        
-        if (userEmail == null || userEmail.isEmpty) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Error: User not logged in properly'),
-              backgroundColor: Colors.red,
-            ),
-          );
-          return;
-        }
-        
-        // Create a copy of the image in app's documents directory
-        final directory = await getApplicationDocumentsDirectory();
-        final path = '${directory.path}/profile_images';
-        
-        // Create directory if it doesn't exist
-        final dir = Directory(path);
-        if (!await dir.exists()) {
-          await dir.create(recursive: true);
-        }
-        
-        // Generate a unique filename with timestamp to avoid cache issues
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final sanitizedEmail = userEmail.replaceAll(RegExp(r'[^\w\s\.]'), '_');
-        final profileImagePath = '$path/profile_${sanitizedEmail}_$timestamp.jpg';
-        
-        // First, remove any old profile images for this user to save space
-        try {
-          final oldImagePath = prefs.getString('profile_image_path_$userEmail');
-          if (oldImagePath != null) {
-            final oldFile = File(oldImagePath);
-            if (await oldFile.exists()) {
-              await oldFile.delete();
-              print('Deleted old profile image: $oldImagePath');
-            }
-          }
-        } catch (e) {
-          print('Error deleting old profile image: $e');
-        }
-        
-        // Copy the file to our app's storage
-        await File(pickedFile.path).copy(profileImagePath);
-        
-        // Update the UI
-        final savedFile = File(profileImagePath);
-        setState(() {
-          _profileImage = savedFile;
-        });
-        
-        // Save image path to SharedPreferences with user-specific key
-        await _saveProfileImagePath(profileImagePath);
-        
-        // Show success message
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Profile image updated successfully for $userEmail'),
-            backgroundColor: Colors.green,
-          ),
-        );
+      if (result['success']) {
+        print('Saved profile image: ${result['imagePath']}');
+        _loadProfileImage(); // Reload to display the new image
+      } else {
+        print('Failed to save profile image: ${result['message']}');
       }
     } catch (e) {
-      print('Error picking profile image: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error updating profile image: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      print('Error saving profile image: $e');
     }
   }
 
@@ -426,11 +519,8 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
               onPressed: () async {
                 Navigator.of(context).pop(); // Close the dialog
                 
-                // Clear user data from SharedPreferences
-                await _clearUserData();
-                
-                // Navigate to role selection screen
-                Navigator.pushReplacementNamed(context, '/role-selection');
+                // Clear user data from Supabase
+                await _logout();
               },
             ),
           ],
@@ -439,48 +529,14 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
     );
   }
 
-  // Method to clear user data from SharedPreferences
-  Future<void> _clearUserData() async {
+  // Method to clear user data from Supabase
+  Future<void> _logout() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final userEmail = _email ?? prefs.getString('current_user_email');
-      
-      // Don't clear profile images of other users
-      if (userEmail != null) {
-        // Only remove profile data for the current user
-        final imagePath = prefs.getString('profile_image_path_$userEmail');
-        if (imagePath != null) {
-          final file = File(imagePath);
-          if (await file.exists()) {
-            await file.delete();
-          }
-          await prefs.remove('profile_image_path_$userEmail');
-        }
-        
-        // Clear user-specific preference data
-        await prefs.remove('user_name_$userEmail');
-        await prefs.remove('user_department_$userEmail');
-        await prefs.remove('user_course_$userEmail');
-        await prefs.remove('user_year_$userEmail');
-        await prefs.remove('user_semester_$userEmail');
-      }
-      
-      // Clear current user data
-      await prefs.remove('current_user_email');
-      await prefs.remove('current_user_name');
-      await prefs.remove('current_user_department');
-      await prefs.remove('current_user_course');
-      await prefs.remove('current_user_year');
-      await prefs.remove('current_user_semester');
-      
-      // Clear login state
-      await prefs.remove('isLoggedIn');
-      await prefs.remove('user_id');
-      await prefs.remove('user_type');
-      
-      print('User data cleared for $userEmail');
+      await _supabaseService.logout();
+      // Navigate to the role selection screen
+      Navigator.pushReplacementNamed(context, '/role-selection');
     } catch (e) {
-      print('Error clearing user data: $e');
+      print('Error during logout: $e');
     }
   }
 
@@ -594,92 +650,99 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
         return;
       }
       
-      final prefs = await SharedPreferences.getInstance();
+      final userData = await _supabaseService.getUserData();
       
-      // First check if the user recently marked attendance
-      final lastAttendanceTimesStr = prefs.getString('last_attendance_times');
-      if (lastAttendanceTimesStr != null) {
-        final Map<String, dynamic> decodedTimes = json.decode(lastAttendanceTimesStr);
-        if (decodedTimes.containsKey(_email)) {
-          final lastAttendance = DateTime.parse(decodedTimes[_email]);
-          // If marked attendance in last 5 minutes, don't show notification
-          if (DateTime.now().difference(lastAttendance).inMinutes < 5) {
-            setState(() {
-              _hasNewQR = false;
-            });
-            return;
+      if (userData != null) {
+        // First check if the user recently marked attendance
+        final lastAttendanceTimesStr = userData['last_attendance_times'];
+        if (lastAttendanceTimesStr != null) {
+          final Map<String, dynamic> decodedTimes = json.decode(lastAttendanceTimesStr);
+          if (decodedTimes.containsKey(_email)) {
+            final lastAttendance = DateTime.parse(decodedTimes[_email]);
+            // If marked attendance in last 5 minutes, don't show notification
+            if (DateTime.now().difference(lastAttendance).inMinutes < 5) {
+              setState(() {
+                _hasNewQR = false;
+              });
+              return;
+            }
           }
         }
-      }
-      
-      List<String> activeSessions = prefs.getStringList('active_sessions') ?? [];
-      
-      if (activeSessions.isEmpty) {
+        
+        List<String> activeSessions = userData['active_sessions'] ?? [];
+        
+        if (activeSessions.isEmpty) {
+          setState(() {
+            _hasNewQR = false;
+          });
+          return;
+        }
+        
+        // Check if there are any unattended sessions for this student
+        bool hasUnattendedSession = false;
+        for (String sessionId in activeSessions) {
+          // Check if this student has already marked attendance for this session
+          bool alreadyAttended = userData['attended_session_${_email}_$sessionId'] ?? false;
+          if (alreadyAttended) {
+            continue; // Skip this session if already attended
+          }
+          
+          // Check if session is relevant to student
+          String? sessionDataString = userData['session_$sessionId'];
+          if (sessionDataString != null) {
+            final sessionData = json.decode(sessionDataString);
+            
+            // Check session timestamp to see if it's still active
+            dynamic timestampValue = sessionData['timestamp'];
+            DateTime? timestamp;
+            if (timestampValue != null) {
+              if (timestampValue is int) {
+                timestamp = DateTime.fromMillisecondsSinceEpoch(timestampValue);
+              } else if (timestampValue is String) {
+                timestamp = DateTime.tryParse(timestampValue);
+              }
+            }
+            
+            // Skip if session is older than 1 hour
+            if (timestamp != null && DateTime.now().difference(timestamp).inHours > 1) {
+              continue;
+            }
+            
+            // Check if session is for this student's course/year/semester
+            final String? sessionCourse = sessionData['course']?.toString();
+            final String? sessionYear = sessionData['year']?.toString();
+            final String? sessionSemester = sessionData['semester']?.toString();
+            
+            bool isRelevant = true;
+            if (sessionCourse != null && sessionCourse.isNotEmpty && sessionCourse != _course) {
+              isRelevant = false;
+            }
+            if (sessionYear != null && sessionYear.isNotEmpty && sessionYear != _year) {
+              isRelevant = false;
+            }
+            if (sessionSemester != null && sessionSemester.isNotEmpty && sessionSemester != _semester) {
+              isRelevant = false;
+            }
+            
+            if (isRelevant) {
+              print('Found relevant active QR session: $sessionId');
+              hasUnattendedSession = true;
+              break;
+            }
+          }
+        }
+        
+        setState(() {
+          _hasNewQR = hasUnattendedSession;
+        });
+        
+        print('QR notification status: ${_hasNewQR ? 'SHOWING' : 'HIDDEN'}');
+      } else {
+        print('No user data available - user not logged in');
         setState(() {
           _hasNewQR = false;
         });
-        return;
       }
-      
-      // Check if there are any unattended sessions for this student
-      bool hasUnattendedSession = false;
-      for (String sessionId in activeSessions) {
-        // Check if this student has already marked attendance for this session
-        bool alreadyAttended = prefs.getBool('attended_session_${_email}_$sessionId') ?? false;
-        if (alreadyAttended) {
-          continue; // Skip this session if already attended
-        }
-        
-        // Check if session is relevant to student
-        String? sessionDataString = prefs.getString('session_$sessionId');
-        if (sessionDataString != null) {
-          final sessionData = json.decode(sessionDataString);
-          
-          // Check session timestamp to see if it's still active
-          dynamic timestampValue = sessionData['timestamp'];
-          DateTime? timestamp;
-          if (timestampValue != null) {
-            if (timestampValue is int) {
-              timestamp = DateTime.fromMillisecondsSinceEpoch(timestampValue);
-            } else if (timestampValue is String) {
-              timestamp = DateTime.tryParse(timestampValue);
-            }
-          }
-          
-          // Skip if session is older than 1 hour
-          if (timestamp != null && DateTime.now().difference(timestamp).inHours > 1) {
-            continue;
-          }
-          
-          // Check if session is for this student's course/year/semester
-          final String? sessionCourse = sessionData['course']?.toString();
-          final String? sessionYear = sessionData['year']?.toString();
-          final String? sessionSemester = sessionData['semester']?.toString();
-          
-          bool isRelevant = true;
-          if (sessionCourse != null && sessionCourse.isNotEmpty && sessionCourse != _course) {
-            isRelevant = false;
-          }
-          if (sessionYear != null && sessionYear.isNotEmpty && sessionYear != _year) {
-            isRelevant = false;
-          }
-          if (sessionSemester != null && sessionSemester.isNotEmpty && sessionSemester != _semester) {
-            isRelevant = false;
-          }
-          
-          if (isRelevant) {
-            print('Found relevant active QR session: $sessionId');
-            hasUnattendedSession = true;
-            break;
-          }
-        }
-      }
-      
-      setState(() {
-        _hasNewQR = hasUnattendedSession;
-      });
-      
-      print('QR notification status: ${_hasNewQR ? 'SHOWING' : 'HIDDEN'}');
     } catch (e) {
       print('Error checking for new QR codes: $e');
       // On error, don't show notification
@@ -692,37 +755,33 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
   // Check for new notifications
   Future<void> _checkForNewNotifications() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      // Logic to check for new notifications would go here
-      // For now, we'll set it to false until actual notification checking is implemented
+      final userData = await _supabaseService.getUserData();
       
-      // Example of how real notification checking would work:
-      // final unreadNotifications = prefs.getStringList('unread_notifications') ?? [];
-      // setState(() {
-      //   _hasNewNotifications = unreadNotifications.isNotEmpty;
-      // });
-      
-      setState(() {
-        _hasNewNotifications = false; // Only set to true when actual notifications exist
-      });
+      if (userData != null) {
+        // Logic to check for new notifications would go here
+        // For now, we'll set it to false until actual notification checking is implemented
+        
+        // Example of how real notification checking would work:
+        // final unreadNotifications = userData['unread_notifications'] ?? [];
+        // setState(() {
+        //   _hasNewNotifications = unreadNotifications.isNotEmpty;
+        // });
+        
+        setState(() {
+          _hasNewNotifications = false; // Only set to true when actual notifications exist
+        });
+      } else {
+        print('No user data available - user not logged in');
+        setState(() {
+          _hasNewNotifications = false; // Default to no notifications on error
+        });
+      }
     } catch (e) {
       print('Error checking for new notifications: $e');
       setState(() {
         _hasNewNotifications = false; // Default to no notifications on error
       });
     }
-  }
-
-  // Update current time and date
-  void _updateTime() {
-    final now = DateTime.now();
-    final timeFormat = "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
-    final dateFormat = "${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year}";
-    
-    setState(() {
-      _currentTime = timeFormat;
-      _currentDate = dateFormat;
-    });
   }
 
   @override
@@ -735,21 +794,155 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
     final cardColor = _isDarkMode ? Color(0xFF374151) : Colors.white;
     final dividerColor = _isDarkMode ? Colors.white24 : Colors.grey.shade300;
     
+    Widget buildLoadingPlaceholder() {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
+        decoration: BoxDecoration(
+          color: Colors.blue,
+          borderRadius: BorderRadius.only(
+            bottomLeft: Radius.circular(20),
+            bottomRight: Radius.circular(20),
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.1),
+              blurRadius: 4,
+              offset: Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // Only show loading for profile picture
+                CircleAvatar(
+                  radius: 30,
+                  backgroundColor: Colors.white.withOpacity(0.2),
+                  child: CircularProgressIndicator(
+                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    strokeWidth: 2,
+                  ),
+                ),
+                SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${_getGreeting()}, 👋',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          color: Colors.white,
+                        ),
+                        ),
+                      Text(
+                        'Student',
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 20),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(
+                      'Email: ',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.white,
+                      ),
+                    ),
+                    Expanded(
+                      child: Text(
+                        'Loading...',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Colors.white,
+                        ),
+              ),
+                    ),
+                  ],
+            ),
+                SizedBox(height: 4),
+                Text(
+                  'Department: Loading...',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.white,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Course: Loading...',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.white,
+              ),
+            ),
+                SizedBox(height: 4),
+                Text(
+                  'Year: Loading...',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.white,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Semester: Loading...',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+            Padding(
+              padding: EdgeInsets.only(top: 16),
+              child: Row(
+                children: [
+                  Expanded(
+                    flex: 3,
+                    child: _buildLocationPanel(),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    
     return WillPopScope(
       onWillPop: _onWillPop,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Student Dashboard'),
-          backgroundColor: primaryColor,
+          backgroundColor: Colors.blue,
           foregroundColor: Colors.white,
           actions: [
-            // Notification bell in AppBar
             Stack(
               alignment: Alignment.center,
               children: [
                 IconButton(
                   icon: Icon(Icons.notifications, color: Colors.white),
-                  onPressed: () {
+                  onPressed: _isLoading ? null : () {
                     Navigator.pushNamed(context, '/notifications', arguments: {
                       'email': _email,
                       'name': _studentName,
@@ -760,7 +953,7 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
                     });
                   },
                 ),
-                if (_hasNewNotifications)
+                if (_hasNewNotifications && !_isLoading)
                   Positioned(
                     top: 10,
                     right: 10,
@@ -784,12 +977,16 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
         body: SingleChildScrollView(
           child: Column(
           children: [
-            // Profile Section
-            Container(
+              // Show loading placeholder or actual content
+              _isLoading ? buildLoadingPlaceholder() : Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
               decoration: BoxDecoration(
-                color: primaryColor,
+                  color: Colors.blue,
+                borderRadius: BorderRadius.only(
+                  bottomLeft: Radius.circular(20),
+                  bottomRight: Radius.circular(20),
+                ),
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withOpacity(0.1),
@@ -801,126 +998,127 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // User greeting and profile picture
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      // Profile Picture with online indicator
-                      Stack(
-                        children: [
-                          CircleAvatar(
-                            radius: 30,
-                            backgroundColor: Colors.white,
-                            backgroundImage: _profileImage != null 
-                              ? FileImage(_profileImage!) 
-                              : null,
-                            child: _profileImage == null 
-                              ? Icon(Icons.person, size: 30, color: primaryColor) 
-                              : null,
-                          ),
-                          // Online indicator dot
-                          Positioned(
-                            bottom: 0,
-                            right: 0,
-                            child: Container(
-                              padding: EdgeInsets.all(2),
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                shape: BoxShape.circle,
-                              ),
-                              child: Container(
-                                height: 8,
-                                width: 8,
-                                decoration: BoxDecoration(
-                                  color: _isOnline ? Colors.green : Colors.grey,
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
+                      _buildProfileAvatar(),
                       SizedBox(width: 12),
-                      // Greeting and name
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              '${_getGreeting()},',
+                              '${_getGreeting()}, 👋',
                               style: const TextStyle(
-                                fontSize: 18,
+                                fontSize: 16,
                                 color: Colors.white,
                               ),
                             ),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    '${_studentName ?? 'Student'} 👋',
+                            Text(
+                              '${_studentName ?? 'Loading...'}',
                                     style: const TextStyle(
-                                      fontSize: 22,
+                                fontSize: 20,
                                       fontWeight: FontWeight.bold,
                                       color: Colors.white,
                                     ),
                                   ),
-                                ),
-                                // Time display
-                                Text(
-                                  _currentTime,
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              ],
-                            ),
                           ],
                         ),
                       ),
                     ],
                   ),
-                  
-                  // Move date directly under the name/time row, right-aligned
-                  Container(
-                    width: double.infinity,
-                    alignment: Alignment.centerRight,
-                    padding: EdgeInsets.only(right: 0, top: 2),
-                    child: Text(
-                      _currentDate,
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                        color: Colors.white.withOpacity(0.9),
+                  SizedBox(height: 20),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.baseline,
+                        textBaseline: TextBaseline.alphabetic,
+                        children: [
+                                Text(
+                            'Email: ',
+                                  style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                          Expanded(
+                            child: Text(
+                              _email ?? 'Loading email...',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.white,
+                            ),
+                        ),
                       ),
+                    ],
+                  ),
+                      SizedBox(height: 4),
+                      Text(
+                        'Department: ${_department ?? 'Loading department...'}',
+                      style: TextStyle(
+                          fontSize: 13,
+                          color: Colors.white,
+                        ),
+                      ),
+                      SizedBox(height: 4),
+                      Text(
+                        'Course: ${_course ?? 'Loading course...'}',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Colors.white,
                     ),
                   ),
-                  
-                  SizedBox(height: 6),
-                  
-                  // User Information (moved up)
+                      SizedBox(height: 4),
+                      Row(
+                        children: [
                   Text(
-                    '${_department ?? 'Department'} - ${_course ?? 'Course'}',
+                            'Year: ',
                     style: TextStyle(
-                      fontSize: 16,
-                      color: Colors.white.withOpacity(0.9),
+                              fontSize: 13,
+                              color: Colors.white,
                     ),
                   ),
-                  SizedBox(height: 2),
                   Text(
-                    'Year ${_year ?? '?'}, Semester ${_semester ?? '?'}',
+                            'Year ${_year?.replaceAll('Year ', '')}',
                     style: TextStyle(
-                      fontSize: 16,
-                      color: Colors.white.withOpacity(0.9),
+                              fontSize: 13,
+                              color: Colors.white,
                     ),
+                          ),
+                        ],
                   ),
-                  SizedBox(height: 2),
+                      SizedBox(height: 4),
+                      Row(
+                        children: [
                   Text(
-                    _email ?? '',
+                            'Semester: ',
                     style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.white.withOpacity(0.8),
+                              fontSize: 13,
+                              color: Colors.white,
+                            ),
+                          ),
+                          Text(
+                            'Semester ${_semester?.replaceAll('Semester ', '')}',
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: Colors.white,
+                            ),
+                    ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  Padding(
+                    padding: EdgeInsets.only(top: 16),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          flex: 3,
+                          child: _buildLocationPanel(),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -950,44 +1148,46 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
                       crossAxisCount: 2,
                       shrinkWrap: true,
                       physics: NeverScrollableScrollPhysics(),
-                      childAspectRatio: 1.1,
+                      childAspectRatio: 1.0,
+                      mainAxisSpacing: 16,
+                      crossAxisSpacing: 16,
                       children: [
                         _buildMenuItem(
-                          icon: Icons.qr_code_scanner,
                           title: 'Scan QR',
                           color: Colors.blue,
                           route: '/scan-qr',
-                          showNotification: _hasNewQR,
+                          assetPath: 'assets/images/student icons/scan qr code.png',
+                          showNotification: _hasNewQR && !_isLoading,
                         ),
                         _buildMenuItem(
-                          icon: Icons.library_add_check,
                           title: 'Register Units',
                           color: Colors.red,
-                          route: '/register-units',
+                          route: '/results-cat',
+                          assetPath: 'assets/images/student icons/cat results.png',
                         ),
                         _buildMenuItem(
-                          icon: Icons.analytics,
                           title: 'Results for CAT',
                           color: Colors.purple,
-                          route: '/results-cat',
+                          route: '/register-units',
+                          assetPath: 'assets/images/student icons/register units.png',
                         ),
                         _buildMenuItem(
-                          icon: Icons.description,
                           title: 'Past Papers',
                           color: Colors.green,
                           route: '/past-papers',
+                          assetPath: 'assets/images/student icons/past papers.png',
                         ),
                         _buildMenuItem(
-                          icon: Icons.rate_review,
                           title: 'Evaluate Lecture',
                           color: Colors.amber,
                           route: '/evaluate-lecture',
+                          assetPath: 'assets/images/student icons/evaluate lecture.png',
                         ),
                         _buildMenuItem(
-                          icon: Icons.card_membership,
-                          title: 'Exam Card Download',
+                          title: 'Exam Card',
                           color: Colors.teal,
                           route: '/exam-card',
+                          assetPath: 'assets/images/student icons/exam card.png',
                         ),
                       ],
                     ),
@@ -1018,26 +1218,28 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
                       crossAxisCount: 2,
                       shrinkWrap: true,
                       physics: NeverScrollableScrollPhysics(),
-                      childAspectRatio: 1.1,
+                      childAspectRatio: 1.0,  // Adjusted for larger icons
+                      mainAxisSpacing: 16,    // Increased spacing
+                      crossAxisSpacing: 16,   // Increased spacing
                       children: [
                         _buildMenuItem(
-                          icon: Icons.calendar_today,
                           title: 'Schedules',
                           color: Colors.blue,
                           route: '/schedules',
+                          assetPath: 'assets/images/student icons/schedules.png',
                         ),
                         _buildMenuItem(
-                          icon: Icons.notifications,
                           title: 'Notifications',
                           color: Colors.red,
                           route: '/notifications',
-                          showNotification: _hasNewNotifications,
+                          assetPath: 'assets/images/student icons/notifications.png',
+                          showNotification: _hasNewNotifications && !_isLoading,
                         ),
                         _buildMenuItem(
-                          icon: Icons.trending_up,
                           title: 'Trends',
                           color: Colors.orange,
                           route: '/trends',
+                          assetPath: 'assets/images/student icons/trends.png',
                         ),
                       ],
                     ),
@@ -1068,13 +1270,15 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
                       crossAxisCount: 2,
                       shrinkWrap: true,
                       physics: NeverScrollableScrollPhysics(),
-                      childAspectRatio: 1.1,
+                      childAspectRatio: 1.0,  // Adjusted for larger icons
+                      mainAxisSpacing: 16,    // Increased spacing
+                      crossAxisSpacing: 16,   // Increased spacing
                       children: [
                         _buildMenuItem(
-                          icon: Icons.chat,
                           title: 'Get in Touch',
                           color: Colors.green,
                           route: '/get-in-touch',
+                          assetPath: 'assets/images/student icons/get in  touch.png',
                         ),
                       ],
                     ),
@@ -1089,57 +1293,57 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
   }
 
   Widget _buildMenuItem({
-    required IconData icon,
     required String title,
     required Color color,
     required String route,
+    required String assetPath,
     bool showNotification = false,
   }) {
-    return Card(
-      elevation: 3,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: InkWell(
+    final textColor = _isDarkMode ? Colors.white : Colors.black87;
+    
+    return InkWell(
         onTap: () {
-          Navigator.pushNamed(context, route, arguments: {
-            'email': _email,
-            'name': _studentName,
-            'department': _department,
-            'course': _course,
-            'year': _year,
-            'semester': _semester,
+          _checkLocationBeforeNavigating(() {
+            Navigator.pushNamed(context, route, arguments: {
+              'email': _email,
+              'name': _studentName,
+              'department': _department,
+              'course': _course,
+              'year': _year,
+              'semester': _semester,
+            });
           });
         },
-        borderRadius: BorderRadius.circular(16),
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+        ),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Stack(
+            Expanded(
+              flex: 4,  // Increased flex for larger icons
+              child: Container(
+                padding: EdgeInsets.all(4),  // Reduced padding to allow larger icon
+                child: Stack(
               clipBehavior: Clip.none,
               children: [
-                Container(
-                  padding: EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: color.withOpacity(0.2),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    icon,
-                    size: 30,
-                    color: color,
-                  ),
+                    Image.asset(
+                      assetPath,
+                      fit: BoxFit.contain,
                 ),
                 if (showNotification)
                   Positioned(
-                    top: -5,
-                    right: -5,
+                        top: -8,
+                        right: -8,
                     child: Container(
                       padding: EdgeInsets.all(4),
                       decoration: BoxDecoration(
                         color: Colors.red,
                         shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white, width: 1.5),
                       ),
                       child: Text(
                         '!',
@@ -1153,14 +1357,24 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
                   ),
               ],
             ),
-            SizedBox(height: 8),
-            Text(
+              ),
+            ),
+            Expanded(
+              flex: 2,
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: 4),
+                child: Text(
               title,
               style: TextStyle(
-                fontSize: 16,
+                    fontSize: 14,
                 fontWeight: FontWeight.w500,
+                color: textColor,
               ),
               textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
             ),
           ],
         ),
@@ -1181,39 +1395,7 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
                 color: Color(0xFF172A45), // Professional header color
                 child: Row(
                   children: [
-                    Stack(
-                      children: [
-                        CircleAvatar(
-                          radius: 30,
-                          backgroundColor: Colors.white,
-                          backgroundImage: _profileImage != null 
-                            ? FileImage(_profileImage!) 
-                            : null,
-                          child: _profileImage == null 
-                            ? Icon(Icons.person, size: 30, color: Color(0xFF0A192F)) 
-                            : null,
-                        ),
-                        Positioned(
-                          bottom: 0,
-                          right: 0,
-                          child: Container(
-                            padding: EdgeInsets.all(2),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              shape: BoxShape.circle,
-                            ),
-                            child: Container(
-                              height: 14,
-                              width: 14,
-                              decoration: BoxDecoration(
-                                color: _isOnline ? Colors.green : Colors.grey,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+                    _buildProfileAvatar(),
                     SizedBox(width: 16),
                     Expanded(
                       child: Column(
@@ -1288,24 +1470,9 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
                     _buildDrawerItem(
                       icon: Icons.update,
                       title: 'Update Details',
-                      onTap: () async {
+                      onTap: () {
                         Navigator.pop(context);
-                        final result = await Navigator.pushNamed(context, '/update-details');
-                        
-                        // Check if we received data back from the update screen
-                        if (result != null && result is Map<String, dynamic> && result['updated'] == true) {
-                          // Force complete refresh of all user data
-                          _refreshAllData();
-                          
-                          // Show a confirmation toast
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text('Profile updated successfully'),
-                              backgroundColor: Colors.green,
-                              duration: Duration(seconds: 2),
-                            ),
-                          );
-                        }
+                        _navigateToUpdateDetailsPage();
                       },
                     ),
                     // Add Dark Mode toggle
@@ -1364,7 +1531,15 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
                 letterSpacing: 0.3,
               ),
             ),
-            onTap: onTap,
+            onTap: () {
+              if (title == 'Update Profile Picture' || title == 'Sign out' || title == 'Dark Mode') {
+                // These don't need location check
+                onTap();
+              } else {
+                // Check location before navigating for other items
+                _checkLocationBeforeNavigating(onTap);
+              }
+            },
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(8),
             ),
@@ -1379,20 +1554,1181 @@ class _StudentDashboardState extends State<StudentDashboard> with WidgetsBinding
     );
   }
 
-  @override
-  void dispose() {
-    // Unsubscribe from connectivity changes
-    _connectivitySubscription.cancel();
+  // Location methods
+  Future<void> _initializeLocation() async {
+    try {
+      // First check if location services are enabled at system level
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      
+      if (!serviceEnabled) {
+        // Show dialog to force location enabling
+        _showEnableLocationDialog();
+        return;
+      }
+      
+      // Check permission
+      LocationPermission permission = await Geolocator.checkPermission();
+      
+      if (permission == LocationPermission.denied) {
+        // Request permission
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          // Show dialog to force permission
+          _showLocationPermissionRequiredDialog();
+          return;
+        }
+      }
+      
+      if (permission == LocationPermission.deniedForever) {
+        // Show dialog that app cannot work without permission
+        _showPermanentlyDeniedLocationDialog();
+        return;
+      }
+      
+      // If we're here, we have permission, so get location
+      _getCurrentLocation();
+    } catch (e) {
+      print('Error initializing location: $e');
+    }
+  }
+  
+  // Profile image picking
+  Future<void> _pickProfileImage() async {
+    try {
+      final ImagePicker picker = ImagePicker();
+      final XFile? image = await picker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 500,
+        maxHeight: 500,
+        imageQuality: 85,
+      );
+      
+      if (image == null) return;
+      
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Uploading profile image...'),
+              ],
+            ),
+          );
+        },
+      );
+      
+      // Upload image to Supabase
+      final File imageFile = File(image.path);
+      final result = await _supabaseService.uploadProfileImage(imageFile);
+      
+      if (!mounted) return;
+      
+      // Dismiss loading dialog
+      Navigator.of(context).pop();
+      
+      if (result['success']) {
+        print('Successfully uploaded image, refreshing UI with new image: ${result['imagePath']}');
+        
+        // Clear existing image cache
+        PaintingBinding.instance.imageCache.clear();
+        PaintingBinding.instance.imageCache.clearLiveImages();
+        
+        // Force profile image reload from Supabase with a small delay
+        // This ensures the UI refreshes with the new image
+        setState(() {
+          // First set loading state
+          _isAvatarLoading = true;
+          
+          // Clear current image so it doesn't stick around
+          _profileImage = null;
+          _profileImagePath = null;
+        });
+        
+        // Delay slightly to ensure state updates fully propagate
+        Future.delayed(Duration(milliseconds: 300), () {
+          if (mounted) {
+            _loadProfileImage();
+          }
+        });
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Profile image updated successfully'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to update profile image: ${result['message']}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      print('Error picking profile image: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error updating profile image'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+  
+  void _showEnableLocationDialog() {
+    if (!mounted) return;
     
-    // Cancel the QR check timer
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Location Required'),
+          content: Text('This app requires location services to function. Please enable location services to continue.'),
+          actions: <Widget>[
+            TextButton(
+              child: Text('Enable Location'),
+              onPressed: () async {
+                Navigator.of(context).pop();
+                await Geolocator.openLocationSettings();
+                
+                // Check again after settings are opened
+                Future.delayed(Duration(seconds: 3), () {
+                  _initializeLocation();
+                });
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+  
+  void _showLocationPermissionRequiredDialog() {
+    if (!mounted) return;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Location Permission Required'),
+          content: Text('This app needs location permission to function properly. Please grant location permission to continue.'),
+          actions: <Widget>[
+            TextButton(
+              child: Text('Request Permission'),
+              onPressed: () async {
+                Navigator.of(context).pop();
+                LocationPermission permission = await Geolocator.requestPermission();
+                if (permission == LocationPermission.denied || 
+                    permission == LocationPermission.deniedForever) {
+                  _showLocationPermissionRequiredDialog();
+                } else {
+                  _getCurrentLocation();
+                }
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+  
+  void _showPermanentlyDeniedLocationDialog() {
+    if (!mounted) return;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Location Permission Denied'),
+          content: Text('Location permission is permanently denied. Please enable it in app settings to use this app.'),
+          actions: <Widget>[
+            TextButton(
+              child: Text('Open Settings'),
+              onPressed: () async {
+                Navigator.of(context).pop();
+                await Geolocator.openAppSettings();
+                
+                // Check again after settings are opened
+                Future.delayed(Duration(seconds: 3), () {
+                  _initializeLocation();
+                });
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+  
+  Future<void> _getCurrentLocation() async {
+    try {
+      setState(() {
+        _currentLocation = "Getting location...";
+      });
+      
+      // If we're offline, update the UI accordingly
+      if (!_isOnline) {
+        setState(() {
+          _currentLocation = "Waiting for network...";
+        });
+        return;
+      }
+      
+      // Check location services are enabled
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        _showEnableLocationDialog();
+        return;
+      }
+      
+      // Check permission status
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        _showLocationPermissionRequiredDialog();
+        return;
+      }
+      
+      if (permission == LocationPermission.deniedForever) {
+        _showPermanentlyDeniedLocationDialog();
+        return;
+      }
+      
+      // Get the current position with retry mechanism
+      Position? position;
+      int retryCount = 0;
+      const maxRetries = 3;
+      
+      while (position == null && retryCount < maxRetries) {
+        try {
+          position = await Geolocator.getCurrentPosition(
+            desiredAccuracy: LocationAccuracy.high,
+            timeLimit: Duration(seconds: 15),
+          );
+        } catch (e) {
+          retryCount++;
+          print('Retry $retryCount: Error getting location: $e');
+          
+          if (retryCount >= maxRetries) {
+            rethrow; // Re-throw after max retries
+          }
+          
+          // Wait before retrying
+          await Future.delayed(Duration(seconds: 1));
+        }
+      }
+      
+      if (position == null) {
+        throw Exception('Failed to get location after $maxRetries retries');
+      }
+      
+      setState(() {
+        _currentPosition = position;
+      });
+      
+      // Get address from coordinates
+      await _getAddressFromCoordinates(position);
+      
+    } catch (e) {
+      print('Error getting current location: $e');
+      setState(() {
+        if (!_isOnline) {
+          _currentLocation = "Waiting for network...";
+        } else {
+          _currentLocation = "Tap to retry";
+        }
+      });
+    }
+  }
+  
+  Future<void> _getAddressFromCoordinates(Position position) async {
+    try {
+      if (!_isOnline) {
+        setState(() {
+          _currentLocation = "Waiting for network...";
+        });
+        return;
+      }
+      
+      List<Placemark> placemarks = await placemarkFromCoordinates(position.latitude, position.longitude);
+      
+      // Comprehensive location extraction function
+      String extractFullLocationDetails(Placemark place) {
+        List<String> locationParts = [];
+        
+        // Always start with country
+        if (place.country != null && place.country!.isNotEmpty) {
+          locationParts.add(place.country!);
+        }
+        
+        // Add university or institution name if possible
+        if (place.name != null && place.name!.isNotEmpty && 
+            (place.name!.contains('University') || place.name!.contains('College'))) {
+          locationParts.add(place.name!);
+        }
+        
+        // Add specific location details
+        if (place.street != null && place.street!.isNotEmpty && 
+            !place.street!.contains('Unnamed')) {
+          locationParts.add(place.street!);
+        }
+        
+        // Add sublocality or neighborhood
+        if (place.subLocality != null && place.subLocality!.isNotEmpty) {
+          locationParts.add(place.subLocality!);
+        }
+        
+        // Add locality (town/city)
+        if (place.locality != null && place.locality!.isNotEmpty) {
+          locationParts.add(place.locality!);
+        }
+        
+        // Add sub-administrative area (district/region)
+        if (place.subAdministrativeArea != null && 
+            place.subAdministrativeArea!.isNotEmpty) {
+          locationParts.add(place.subAdministrativeArea!);
+        }
+        
+        // Add administrative area (county/state)
+        if (place.administrativeArea != null && 
+            place.administrativeArea!.isNotEmpty) {
+          locationParts.add(place.administrativeArea!);
+        }
+        
+        // Remove duplicates and empty/generic strings
+        locationParts = locationParts.where((part) => 
+            part.isNotEmpty && 
+            part.toLowerCase() != 'unnamed' && 
+            part.toLowerCase() != 'unknown'
+        ).toSet().toList();
+        
+        return locationParts.join(', ');
+      }
+      
+      // Try to get the most detailed location from available placemarks
+      String locationName = '';
+      for (var place in placemarks) {
+        locationName = extractFullLocationDetails(place);
+        if (locationName.isNotEmpty) break;
+      }
+      
+      // Fallback to a comprehensive location if no details found
+      if (locationName.isEmpty) {
+        locationName = "Kenya, Tharaka University College, Tharaka-Nithi County";
+      }
+      
+      // Ensure the location is not too long
+      if (locationName.length > 100) {
+        locationName = "${locationName.substring(0, 97)}...";
+      }
+      
+      setState(() {
+        _currentLocation = locationName;
+      });
+
+      // Get current user data
+      final userData = _supabaseService.getCurrentUser();
+      String? studentId;
+      
+      if (userData != null && userData.containsKey('student_id')) {
+        studentId = userData['student_id'];
+      }
+      
+      // If no student ID, try to get it from Supabase
+      if (studentId == null && userData != null && userData.containsKey('email') && userData.containsKey('id')) {
+        studentId = await _supabaseService.ensureStudentRecordExists(
+          userData['id'],
+          userData['email']
+        );
+      }
+
+          if (studentId != null) {
+        // Try both update methods to ensure the location is stored
+        bool success = await _supabaseService.updateStudentLocation(
+              studentId, 
+              locationName,
+              position.latitude,
+              position.longitude
+            );
+            
+        if (!success) {
+          // Try direct update as fallback
+            success = await _supabaseService.updateLocationDirect(
+              studentId,
+              locationName,
+              position.latitude,
+              position.longitude
+            );
+        }
+            
+        if (!success) {
+          print('Failed to update location in database after multiple attempts');
+              }
+            }
+          } catch (e) {
+      print('Error getting and updating address: $e');
+      setState(() {
+        if (!_isOnline) {
+          _currentLocation = "Waiting for network...";
+        } else {
+          _currentLocation = "Kenya, Tharaka University College, Tharaka-Nithi County";
+        }
+      });
+    }
+  }
+
+  // Helper method to check location before navigation
+  void _checkLocationBeforeNavigating(VoidCallback onLocationAvailable) async {
+    // Show loading dialog to indicate we're getting location
+    bool showLoading = _currentPosition == null || _currentLocation == "Getting location..." || _currentLocation == "Waiting for network..." || _currentLocation == "Tap to retry" || _currentLocation == "Location unavailable";
+    
+    if (showLoading) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          title: Text('Please Wait'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Determining your location...\nThis is required to continue.'),
+            ],
+          ),
+        ),
+      );
+    }
+    
+    // Check if location services are enabled
+    bool isLocationEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!isLocationEnabled) {
+      if (showLoading) Navigator.pop(context); // Dismiss loading dialog
+      _showEnableLocationDialog();
+      return;
+    }
+    
+    // Check permission status
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      if (showLoading) Navigator.pop(context); // Dismiss loading dialog
+      _showLocationPermissionRequiredDialog();
+      return;
+    }
+    
+    if (permission == LocationPermission.deniedForever) {
+      if (showLoading) Navigator.pop(context); // Dismiss loading dialog
+      _showPermanentlyDeniedLocationDialog();
+      return;
+    }
+    
+    // If not online, show dialog
+    if (!_isOnline) {
+      if (showLoading) Navigator.pop(context); // Dismiss loading dialog
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('Network Required'),
+          content: Text('Internet connection is required to verify your location. Please connect to a network and try again.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text('OK'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    
+    // If we don't have a current position yet, try to get one
+    if (_currentPosition == null || _currentLocation == "Getting location..." || 
+        _currentLocation == "Waiting for network..." || _currentLocation == "Tap to retry" || 
+        _currentLocation == "Location unavailable") {
+      
+      try {
+        Position position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 15),
+        );
+        
+        setState(() {
+          _currentPosition = position;
+        });
+        
+        // Get address from coordinates - wait for this to complete
+        await _getAddressFromCoordinates(position);
+        
+        // Now check if we have a valid location
+        if (_currentLocation == "Getting location..." || 
+            _currentLocation == "Waiting for network..." || 
+            _currentLocation == "Tap to retry" || 
+            _currentLocation == "Location unavailable") {
+          if (showLoading) Navigator.pop(context); // Dismiss loading dialog
+          
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Unable to determine your location. Please try again later.'),
+              duration: Duration(seconds: 3),
+            ),
+          );
+          return;
+        }
+        
+        // We have a valid location, dismiss dialog and proceed
+        if (showLoading) Navigator.pop(context); // Dismiss loading dialog
+        onLocationAvailable();
+        
+      } catch (e) {
+        print("Error getting location before navigation: $e");
+        if (showLoading) Navigator.pop(context); // Dismiss loading dialog
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Location is required to continue. Please try again.'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    } else {
+      // We already have a location, proceed
+      if (showLoading) Navigator.pop(context); // Dismiss loading dialog in case it was showing
+      onLocationAvailable();
+    }
+  }
+
+  // Initialize connectivity
+  Future<void> _initConnectivity() async {
+    try {
+      final result = await Connectivity().checkConnectivity();
+      _updateConnectionStatus(result);
+    } catch (e) {
+      print('Error initializing connectivity: $e');
+    }
+  }
+
+  // Check location services
+  Future<void> _checkLocationServices() async {
+    try {
+      _locationServiceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (_locationServiceEnabled) {
+        _permissionStatus = await Geolocator.checkPermission();
+        if (_permissionStatus == LocationPermission.whileInUse ||
+            _permissionStatus == LocationPermission.always) {
+          _getCurrentLocation();
+        } else {
+          _initializeLocation();
+        }
+      } else {
+        _initializeLocation();
+      }
+    } catch (e) {
+      print('Error checking location services: $e');
+    }
+  }
+
+  // Start QR check timer
+  void _startQRCheckTimer() {
+    // Cancel existing timer if it exists
     _qrCheckTimer?.cancel();
     
-    // Cancel the clock timer
-    _clockTimer?.cancel();
+    // Check immediately
+    _checkForNewQRCode();
+    _checkForNewNotifications();
     
-    // Remove this object as an observer for app lifecycle events
-    WidgetsBinding.instance.removeObserver(this);
-    
-    super.dispose();
+    // Then set up timer for periodic checks
+    _qrCheckTimer = Timer.periodic(Duration(seconds: 30), (timer) {
+      if (mounted) {
+        _checkForNewQRCode();
+        _checkForNewNotifications();
+      }
+    });
+  }
+
+  // Start a timer to update location periodically
+  void _startLocationUpdateTimer() {
+    // Update location every 5 minutes (300 seconds)
+    Timer.periodic(Duration(seconds: 300), (timer) {
+      if (mounted && _isOnline) {
+        print('Periodic location update triggered');
+        _getCurrentLocation();
+      }
+    });
+  }
+
+  Widget _buildProfileAvatar() {
+    return Stack(
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 2),
+          ),
+          child: _isAvatarLoading
+              ? CircleAvatar(
+                  radius: 30,
+                  backgroundColor: Colors.grey[200],
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+                  ),
+                )
+              : GestureDetector(
+                  onTap: _pickProfileImage,
+                  child: CircleAvatar(
+                    radius: 30,
+                    backgroundColor: Colors.grey[200],
+                    backgroundImage: _profileImage != null
+                        ? FileImage(_profileImage as File)
+                        : (_profileImagePath != null && 
+                           _profileImagePath!.isNotEmpty)
+                            ? NetworkImage(_profileImagePath!) as ImageProvider<Object>
+                            : null,
+                    child: (_profileImage == null &&
+                            (_profileImagePath == null || 
+                             _profileImagePath!.isEmpty))
+                        ? Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.add_a_photo_outlined,
+                                size: 20,
+                                color: Colors.grey[600],
+                              ),
+                              SizedBox(height: 2),
+                              Text(
+                                'Add',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.grey[600],
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          )
+                        : null,
+                  ),
+                ),
+        ),
+        // Online indicator dot
+        Positioned(
+          bottom: 0,
+          right: 0,
+          child: Container(
+            padding: EdgeInsets.all(2),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              shape: BoxShape.circle,
+            ),
+            child: Container(
+              height: 8,
+              width: 8,
+              decoration: BoxDecoration(
+                color: _isOnline ? Colors.green : Colors.grey,
+                shape: BoxShape.circle,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // Navigate to the update details page
+  void _navigateToUpdateDetailsPage() async {
+    if (_isOnline) {
+      // Make sure we have fresh user data before showing update form
+      await _supabaseService.refreshUserData();
+      
+      if (mounted) {
+        // Create map with current dashboard values to pass to update page
+        Map<String, dynamic> currentUserData = {
+          'email': _email,
+          'name': _studentName,
+          'department': _department,
+          'course': _course,
+          'year': _year,
+          'semester': _semester,
+          'id': _supabaseService.getCurrentUser()?['id'],
+          'student_id': _supabaseService.getCurrentUser()?['student_id'],
+          'password': _supabaseService.getCurrentUser()?['password'],
+        };
+        
+        // Navigate to update page with current data
+        final result = await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => UpdateDetailsPage(),
+            settings: RouteSettings(arguments: {'userData': currentUserData}),
+          ),
+        );
+        
+        // Handle result when returning from update page
+        if (result != null && result is Map<String, dynamic>) {
+          if (result.containsKey('updated') && result['updated'] == true) {
+            print('Profile updated, refreshing dashboard with new data');
+            
+            if (result.containsKey('userData') && result['userData'] != null) {
+              // Update UI immediately with returned data for instant feedback
+              setState(() {
+                final userData = result['userData'] as Map<String, dynamic>;
+                _studentName = userData['name'];
+                _department = userData['department'];
+                _course = userData['course'];
+                _year = userData['year'];
+                _semester = userData['semester'];
+              });
+              
+              // Important: Update the current user in Supabase service BEFORE refreshing
+              _supabaseService.updateCurrentUserCache(result['userData']);
+              
+              // Force a full refresh from database
+              final refreshResult = await _supabaseService.refreshUserData();
+              if (refreshResult != null) {
+                setState(() {
+                  _studentName = refreshResult['name'];
+                  _department = refreshResult['department'];
+                  _course = refreshResult['course'];
+                  _year = refreshResult['year'];
+                  _semester = refreshResult['semester'];
+                  print('Dashboard fully refreshed with latest data: $_studentName');
+                });
+              }
+              
+              // Don't call _loadUserData() as it might override with cached data
+              // Instead explicitly set all UI fields from the refreshed data
+            }
+            
+            // Show a success message
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Profile updated successfully!'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+        }
+      }
+    } else {
+      // Show offline message
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('You are offline. Please connect to the internet to update your profile.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  // Force update location and ensure it's saved to the database
+  Future<void> _forceUpdateLocation() async {
+    try {
+      setState(() {
+        _currentLocation = "Getting location...";
+      });
+      
+      if (!_isOnline) {
+        setState(() {
+          _currentLocation = "Waiting for network...";
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Please connect to the internet to update your location'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
+      
+      // Check if location services are enabled
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        _showEnableLocationDialog();
+        return;
+      }
+      
+      // Check permission status
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        _showLocationPermissionRequiredDialog();
+        return;
+      }
+      
+      if (permission == LocationPermission.deniedForever) {
+        _showPermanentlyDeniedLocationDialog();
+        return;
+      }
+      
+      // Show loading indicator
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white,
+                ),
+              ),
+              SizedBox(width: 16),
+              Text('Updating your location...'),
+            ],
+          ),
+          duration: Duration(seconds: 5),
+          backgroundColor: Colors.blue,
+        ),
+      );
+      
+      // Get location with high accuracy
+      final Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: Duration(seconds: 20),
+      );
+      
+      // Process and save location with comprehensive details
+      await _getAndUpdateAddress(position);
+      
+      // Show success message
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+          content: Text('Location updated successfully'),
+            backgroundColor: Colors.green,
+          ),
+        );
+    } catch (e) {
+      print('Error during force location update: $e');
+      
+      // Show error message
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to update location. Please try again.'),
+              backgroundColor: Colors.red,
+            ),
+          );
+      
+      setState(() {
+        _currentLocation = "Kenya, Tharaka University College, Tharaka-Nithi County";
+      });
+    }
+  }
+
+  Widget _buildLocationPanel() {
+    return Container(
+      width: double.infinity,  // Make it full width
+      margin: EdgeInsets.only(right: 8),
+      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.white.withOpacity(0.5), width: 1),
+        borderRadius: BorderRadius.circular(8),
+        color: Colors.white.withOpacity(0.1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.max,
+        children: [
+          Icon(Icons.location_on, color: Colors.white, size: 16),
+          SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+              _currentLocation,
+              style: TextStyle(
+                fontSize: 13,
+                color: Colors.white,
+                    height: 1.2,
+                    fontWeight: FontWeight.w500,
+              ),
+                  maxLines: 3,  // Increase max lines to show more details
+              overflow: TextOverflow.ellipsis,
+                ),
+                if (_currentLocation == "Waiting for network..." || 
+                    _currentLocation == "Getting location..." ||
+                    _currentLocation == "Tharaka-Nithi County")
+                  Text(
+                    "Tap to update precise location",
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.white.withOpacity(0.7),
+                      height: 1.2,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          GestureDetector(
+            onTap: _forceUpdateLocation,
+            child: Padding(
+              padding: EdgeInsets.only(left: 6),
+              child: Icon(Icons.refresh, color: Colors.white, size: 14),
+            ),
+          )
+        ],
+      ),
+    );
+  }
+
+  // Initialize location with immediate update
+  Future<void> _initializeLocationImmediate() async {
+    try {
+      // First check if location services are enabled
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      
+      if (!serviceEnabled) {
+        _showEnableLocationDialog();
+        return;
+      }
+      
+      // Check permission
+      LocationPermission permission = await Geolocator.checkPermission();
+      
+      if (permission == LocationPermission.denied) {
+        // Request permission
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          _showLocationPermissionRequiredDialog();
+          return;
+        }
+      }
+      
+      if (permission == LocationPermission.deniedForever) {
+        _showPermanentlyDeniedLocationDialog();
+        return;
+      }
+      
+      // Get current position with high accuracy
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: Duration(seconds: 20),
+      );
+
+      setState(() {
+        _currentPosition = position;
+      });
+
+      // Get and update address immediately with comprehensive details
+      await _getAndUpdateAddress(position);
+      
+    } catch (e) {
+      print('Error initializing immediate location: $e');
+      setState(() {
+        _currentLocation = _isOnline ? "Tap to retry" : "Waiting for network...";
+      });
+    }
+  }
+
+  // Get and update address with immediate database update
+  Future<void> _getAndUpdateAddress(Position position) async {
+    try {
+      print('🌍 LOCATION UPDATE DETECTION 🌍');
+      print('🕒 Timestamp: ${DateTime.now()}');
+      print('🌐 New Coordinates: Lat ${position.latitude}, Lon ${position.longitude}');
+      
+      // Compare with previous known location
+      if (_currentPosition != null) {
+        double distanceDifference = Geolocator.distanceBetween(
+          _currentPosition!.latitude, 
+          _currentPosition!.longitude, 
+          position.latitude, 
+          position.longitude
+        );
+        
+        print('📏 Distance from Previous Location: ${distanceDifference.toStringAsFixed(2)} meters');
+        
+        // Significant location change threshold (e.g., 500 meters)
+        if (distanceDifference > 500) {
+          print('🚨 SIGNIFICANT LOCATION CHANGE DETECTED! 🚨');
+        }
+      }
+
+      if (!_isOnline) {
+        print('🚫 Offline: Cannot update location');
+        setState(() {
+          _currentLocation = "Waiting for network...";
+        });
+        return;
+      }
+
+      List<Placemark> placemarks = await placemarkFromCoordinates(position.latitude, position.longitude);
+      
+      // Comprehensive location extraction function
+      String extractFullLocationDetails(Placemark place) {
+        List<String> locationParts = [];
+        
+        print('🏠 Placemark Details:');
+        print('   Country: ${place.country}');
+        print('   Name: ${place.name}');
+        print('   Street: ${place.street}');
+        print('   Locality: ${place.locality}');
+        print('   Sub-Locality: ${place.subLocality}');
+        print('   Administrative Area: ${place.administrativeArea}');
+        print('   Sub-Administrative Area: ${place.subAdministrativeArea}');
+        
+        // Always start with country
+        if (place.country != null && place.country!.isNotEmpty) {
+          locationParts.add(place.country!);
+        }
+        
+        // Add university or institution name if possible
+        if (place.name != null && place.name!.isNotEmpty && 
+            (place.name!.contains('University') || place.name!.contains('College'))) {
+          locationParts.add(place.name!);
+        }
+        
+        // Add specific location details
+        if (place.street != null && place.street!.isNotEmpty && 
+            !place.street!.contains('Unnamed')) {
+          locationParts.add(place.street!);
+        }
+        
+        // Add sublocality or neighborhood
+        if (place.subLocality != null && place.subLocality!.isNotEmpty) {
+          locationParts.add(place.subLocality!);
+        }
+        
+        // Add locality (town/city)
+      if (place.locality != null && place.locality!.isNotEmpty) {
+          locationParts.add(place.locality!);
+        }
+        
+        // Add sub-administrative area (district/region)
+        if (place.subAdministrativeArea != null && 
+            place.subAdministrativeArea!.isNotEmpty) {
+          locationParts.add(place.subAdministrativeArea!);
+        }
+        
+        // Add administrative area (county/state)
+      if (place.administrativeArea != null && 
+            place.administrativeArea!.isNotEmpty) {
+          locationParts.add(place.administrativeArea!);
+        }
+        
+        // Remove duplicates and empty/generic strings
+        locationParts = locationParts.where((part) => 
+            part.isNotEmpty && 
+            part.toLowerCase() != 'unnamed' && 
+            part.toLowerCase() != 'unknown'
+        ).toSet().toList();
+        
+        return locationParts.join(', ');
+      }
+      
+      // Try to get the most detailed location from available placemarks
+      String locationName = '';
+      for (var place in placemarks) {
+        locationName = extractFullLocationDetails(place);
+        if (locationName.isNotEmpty) break;
+      }
+      
+      // Fallback to a comprehensive location if no details found
+      if (locationName.isEmpty) {
+        locationName = "Kenya, Tharaka University College, Tharaka-Nithi County";
+      }
+      
+      // Ensure the location is not too long
+      if (locationName.length > 100) {
+        locationName = "${locationName.substring(0, 97)}...";
+      }
+
+      print('📍 Extracted Location: $locationName');
+      
+      setState(() {
+        _currentLocation = locationName;
+      });
+
+      // Get current user data
+      final userData = _supabaseService.getCurrentUser();
+      String? studentId;
+      
+      if (userData != null && userData.containsKey('student_id')) {
+        studentId = userData['student_id'];
+      }
+
+      // If no student ID, try to get it from Supabase
+      if (studentId == null && userData != null && userData.containsKey('email') && userData.containsKey('id')) {
+        studentId = await _supabaseService.ensureStudentRecordExists(
+          userData['id'],
+          userData['email']
+        );
+      }
+
+      if (studentId != null) {
+        print('🆔 Student ID for location update: $studentId');
+        
+        // Try both update methods to ensure the location is stored
+        bool success = await _supabaseService.updateStudentLocation(
+          studentId,
+          locationName,
+          position.latitude,
+          position.longitude
+        );
+
+        if (!success) {
+          // Try direct update as fallback
+          success = await _supabaseService.updateLocationDirect(
+            studentId,
+            locationName,
+            position.latitude,
+            position.longitude
+          );
+        }
+
+        if (!success) {
+          print('❌ Failed to update location in database after multiple attempts');
+        } else {
+          print('✅ Location successfully updated in database');
+        }
+      } else {
+        print('❌ No student ID found for location update');
+      }
+    } catch (e) {
+      print('🚨 Error getting and updating address: $e');
+      setState(() {
+        if (!_isOnline) {
+          _currentLocation = "Waiting for network...";
+        } else {
+          _currentLocation = "Kenya, Tharaka University College, Tharaka-Nithi County";
+        }
+      });
+    }
+  }
+
+  // Helper methods to format year and semester
+  String _formatYear(String? year) {
+    if (year == null || year.isEmpty) return 'Year ?';
+    // Remove any existing "Year" prefix and trim
+    year = year.replaceAll(RegExp(r'^Year\s*'), '').trim();
+    return 'Year $year';
+  }
+
+  String _formatSemester(String? semester) {
+    if (semester == null || semester.isEmpty) return 'Semester ?';
+    // Remove any existing "Semester" prefix and trim
+    semester = semester.replaceAll(RegExp(r'^Semester\s*'), '').trim();
+    return 'Semester $semester';
+  }
+
+  // Setup connectivity listener
+  void _setupConnectivityListener() {
+    _initConnectivity();
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(_updateConnectionStatus);
+  }
+
+  // Check location permission
+  void _checkLocationPermission() {
+    _initializeLocationImmediate();
+    _startLocationUpdateTimer();
   }
 } 

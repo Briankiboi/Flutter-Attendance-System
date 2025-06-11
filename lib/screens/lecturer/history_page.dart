@@ -18,11 +18,11 @@ class PrintAttendancePage extends StatefulWidget {
   final Map<String, dynamic> sessionData;
   final List<Map<String, dynamic>>? relatedSessions;
 
-  PrintAttendancePage({
-    Key? key, 
+  const PrintAttendancePage({
+    super.key, 
     required this.sessionData, 
     this.relatedSessions
-  }) : super(key: key);
+  });
 
   @override
   _PrintAttendancePageState createState() => _PrintAttendancePageState();
@@ -32,7 +32,7 @@ class _PrintAttendancePageState extends State<PrintAttendancePage> {
   final GlobalKey _printKey = GlobalKey();
   bool _isLoading = false;
   int _selectedSessionIndex = 0;
-  bool _combinedPrintMode = false;
+  final bool _combinedPrintMode = false;
 
   @override
   Widget build(BuildContext context) {
@@ -587,12 +587,12 @@ class _PrintAttendancePageState extends State<PrintAttendancePage> {
       final session = widget.relatedSessions?[_selectedSessionIndex] ?? widget.sessionData;
       
       // Load logo image for PDF
-      final ByteData? logoData = await rootBundle.load('assets/images/university_logo.png');
+      final ByteData logoData = await rootBundle.load('assets/images/university_logo.png');
       final Uint8List? logoBytes = logoData?.buffer.asUint8List();
       final pw.MemoryImage? logoImage = logoBytes != null ? pw.MemoryImage(logoBytes) : null;
       
       // Load QR code image for PDF
-      final ByteData? qrData = await rootBundle.load('assets/images/icon.png');
+      final ByteData qrData = await rootBundle.load('assets/images/icon.png');
       final Uint8List? qrBytes = qrData?.buffer.asUint8List();
       final pw.MemoryImage? qrImage = qrBytes != null ? pw.MemoryImage(qrBytes) : null;
       
@@ -1079,12 +1079,12 @@ class _PrintAttendancePageState extends State<PrintAttendancePage> {
       final semester = sampleSession['semester'] ?? '';
       
       // Load logo image for PDF
-      final ByteData? logoData = await rootBundle.load('assets/images/university_logo.png');
+      final ByteData logoData = await rootBundle.load('assets/images/university_logo.png');
       final Uint8List? logoBytes = logoData?.buffer.asUint8List();
       final pw.MemoryImage? logoImage = logoBytes != null ? pw.MemoryImage(logoBytes) : null;
       
       // Load QR code image for PDF
-      final ByteData? qrData = await rootBundle.load('assets/images/icon.png');
+      final ByteData qrData = await rootBundle.load('assets/images/icon.png');
       final Uint8List? qrBytes = qrData?.buffer.asUint8List();
       final pw.MemoryImage? qrImage = qrBytes != null ? pw.MemoryImage(qrBytes) : null;
       
@@ -1562,6 +1562,8 @@ class _PrintAttendancePageState extends State<PrintAttendancePage> {
 }
 
 class HistoryPage extends StatefulWidget {
+  const HistoryPage({super.key});
+
   @override
   _HistoryPageState createState() => _HistoryPageState();
 }
@@ -1570,7 +1572,7 @@ class _HistoryPageState extends State<HistoryPage> {
   List<Map<String, dynamic>> _sessions = [];
   bool _isLoading = true;
   DateTime? _selectedDate;
-  bool _filterWeek = false;
+  final bool _filterWeek = false;
   int _selectedWeek = 0; // 0=none, 1-4 = week of month
   int _selectedMonth = 0; // 0=current, -1/-2=previous, 1/2=next
   Timer? _refreshTimer;
@@ -2623,7 +2625,7 @@ class _HistoryPageState extends State<HistoryPage> {
                                                 ),
                                                 SizedBox(height: 4),
                                                 Text(
-                                                  '${presentCount}',
+                                                  '$presentCount',
                                                   style: TextStyle(
                                                     fontSize: 18,
                                                     fontWeight: FontWeight.bold,
@@ -2648,7 +2650,7 @@ class _HistoryPageState extends State<HistoryPage> {
                                                 ),
                                                 SizedBox(height: 4),
                                                 Text(
-                                                  '${absentCount}',
+                                                  '$absentCount',
                                                   style: TextStyle(
                                                     fontSize: 18,
                                                     fontWeight: FontWeight.bold,
@@ -2673,7 +2675,7 @@ class _HistoryPageState extends State<HistoryPage> {
                                                 ),
                                                 SizedBox(height: 4),
                                                 Text(
-                                                  '${session['eligibleCount'] ?? presentCount + absentCount}',
+                                                  '${presentCount + absentCount}',
                                                   style: TextStyle(
                                                     fontSize: 18,
                                                     fontWeight: FontWeight.bold,
@@ -2702,8 +2704,8 @@ class _HistoryPageState extends State<HistoryPage> {
                                             children: [
                                               TabBar(
                                                 tabs: [
-                                                  Tab(text: 'Present (${presentCount})'),
-                                                  Tab(text: 'Absent (${absentCount})'),
+                                                  Tab(text: 'Present ($presentCount)'),
+                                                  Tab(text: 'Absent ($absentCount)'),
                                                 ],
                                                 labelColor: Colors.blue.shade700,
                                                 indicatorColor: Colors.blue,
@@ -2870,7 +2872,7 @@ class _HistoryPageState extends State<HistoryPage> {
                             ),
                           ),
                         );
-                      }).toList(),
+                      }),
                     ],
                   );
                 },

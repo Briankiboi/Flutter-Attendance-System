@@ -6,6 +6,8 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 
 class ViewPage extends StatefulWidget {
+  const ViewPage({super.key});
+
   @override
   _ViewPageState createState() => _ViewPageState();
 }
@@ -356,26 +358,26 @@ class _ViewPageState extends State<ViewPage> {
                           children: [
                             FloatingActionButton(
                               mini: true,
-                              child: Icon(Icons.fullscreen_exit),
                               onPressed: _toggleFullScreen,
                               backgroundColor: Colors.black54,
                               tooltip: 'Exit fullscreen',
+                              child: Icon(Icons.fullscreen_exit),
                             ),
                             SizedBox(height: 8),
                             FloatingActionButton(
                               mini: true,
-                              child: Icon(Icons.screen_rotation),
                               onPressed: _rotateToPortrait,
                               backgroundColor: Colors.black54,
                               tooltip: 'Rotate to portrait',
+                              child: Icon(Icons.screen_rotation),
                             ),
                             SizedBox(height: 8),
                             FloatingActionButton(
                               mini: true,
-                              child: Icon(Icons.upload_file),
                               onPressed: _pickImage,
                               backgroundColor: Colors.black54,
                               tooltip: 'Update image',
+                              child: Icon(Icons.upload_file),
                             ),
                           ],
                         ),

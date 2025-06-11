@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 class EvaluateLecturePage extends StatelessWidget {
-  const EvaluateLecturePage({Key? key}) : super(key: key);
+  const EvaluateLecturePage({super.key});
 
   @override
   Widget build(BuildContext context) {

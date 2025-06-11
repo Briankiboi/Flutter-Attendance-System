@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 class LecturerNotificationsPage extends StatefulWidget {
-  const LecturerNotificationsPage({Key? key}) : super(key: key);
+  const LecturerNotificationsPage({super.key});
 
   @override
   State<LecturerNotificationsPage> createState() => _LecturerNotificationsPageState();

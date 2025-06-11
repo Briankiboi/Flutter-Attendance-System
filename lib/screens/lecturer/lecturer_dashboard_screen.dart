@@ -9,24 +9,31 @@ import 'package:path_provider/path_provider.dart';
 import 'package:qr_attendance/routes/app_routes.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
+import 'package:qr_attendance/services/supabase_service.dart';
 
 class LecturerDashboardScreen extends StatefulWidget {
-  const LecturerDashboardScreen({Key? key}) : super(key: key);
+  const LecturerDashboardScreen({super.key});
 
   @override
   State<LecturerDashboardScreen> createState() => _LecturerDashboardScreenState();
 }
 
 class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with WidgetsBindingObserver {
-  String? _lectureNumber;
+  final SupabaseService _supabaseService = SupabaseService();
+  
+  String? _email;
   String? _lecturerName;
   String? _department;
   String? _occupation;
   String? _employmentType;
   String? _gender;
+  String? _profileImageUrl;
   
-  // Profile picture variables
-  File? _profileImage;
+  // Add loading state for avatar
+  bool _isAvatarLoading = false;
+  
+  // Add image refresh timer
+  Timer? _imageRefreshTimer;
   
   // Internet connectivity tracking
   bool _isOnline = true;
@@ -43,79 +50,82 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
   // Location variables
   String _currentLocation = "Fetching location...";
   Position? _currentPosition;
-  bool _locationServiceEnabled = false;
+  final bool _locationServiceEnabled = false;
   LocationPermission? _permissionStatus;
+
+  // Loading state
+  bool _isLoading = false;
 
   @override
   void initState() {
     super.initState();
-    
-    // Register this object as an observer for app lifecycle events
     WidgetsBinding.instance.addObserver(this);
     
-    // Initialize location first, as it's required for app functionality
-    _initializeLocation();
+    setState(() {
+      _isLoading = true;
+      _isAvatarLoading = true;
+    });
     
-    // Load user data and preferences
-    _loadUserData();
-    _loadProfileImage();
+    // Initialize internet connectivity checking
+    _checkConnectivity();
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(_updateConnectionStatus);
+    
+    // Start clock timer
+    _updateTime();
+    _clockTimer = Timer.periodic(Duration(seconds: 1), (timer) => _updateTime());
+    
+    // Initialize location immediately
+    _initializeLocationImmediate();
+    
+    // Load dark mode preference
     _loadDarkModePreference();
     
-    // Initialize connectivity status
-    _checkConnectivity();
-    
-    // Setup connectivity listener
-    _connectivitySubscription = Connectivity().onConnectivityChanged.listen((ConnectivityResult result) {
-      _updateConnectionStatus(result);
-    });
-
-    // Initialize time and date
-    _updateTime();
-    
-    // Setup timer to update time every second
-    _clockTimer = Timer.periodic(Duration(seconds: 1), (timer) {
+    // Load user data including profile image
+    _loadUserData().then((_) {
       if (mounted) {
-        _updateTime();
+        setState(() {
+          _isLoading = false;
+        });
       }
     });
+    
+    // Set up periodic profile image refresh
+    _scheduleImageUrlRefresh();
+    
+    // Set up periodic location updates for better tracking
+    _startLocationUpdateTimer();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    super.didChangeAppLifecycleState(state);
-    if (state == AppLifecycleState.resumed) {
-      _refreshAllData();
-    }
-  }
-
-  void _refreshAllData() {
-    if (mounted) {
-      print('Refreshing all dashboard data...');
-      _loadUserData();
-      _loadProfileImage();
+  Future<void> _initializeData() async {
+    setState(() {
+      _isLoading = true;
+    });
+    
+    try {
+      // First get the latest data directly from database
+      await _supabaseService.refreshUserData();
+      
+      // Load user data
+    await _loadUserData();
+      
+      // Start other services
+    _startClock();
+    _checkConnectivity();
+    _setupConnectivityStream();
       _getCurrentLocation();
-    }
-  }
-
-  // Load dark mode preference
-  Future<void> _loadDarkModePreference() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      setState(() {
-        _isDarkMode = prefs.getBool('dark_mode_enabled') ?? false;
-      });
+      
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     } catch (e) {
-      print('Error loading dark mode preference: $e');
-    }
-  }
-
-  // Save dark mode preference
-  Future<void> _saveDarkModePreference(bool value) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool('dark_mode_enabled', value);
-    } catch (e) {
-      print('Error saving dark mode preference: $e');
+      print('Error initializing data: $e');
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -125,216 +135,227 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
     final args = ModalRoute.of(context)?.settings.arguments;
     if (args is Map<String, dynamic>) {
       setState(() {
-        _lectureNumber = args['lectureNumber'];
+        _email = args['email'];
         _lecturerName = args['name'];
         _department = args['department'];
         _occupation = args['occupation'];
         _employmentType = args['employmentType'];
         _gender = args['gender'];
+        
+        // Only update profile image if it's provided and different
+        if (args['profile_image_path'] != null && 
+            args['profile_image_path'].toString().isNotEmpty &&
+            args['profile_image_path'] != _profileImageUrl) {
+          _profileImageUrl = args['profile_image_path'];
+          // Pre-cache the image
+          if (_profileImageUrl != null && _profileImageUrl!.startsWith('http')) {
+            precacheImage(
+              NetworkImage(_profileImageUrl!),
+              context,
+              onError: (exception, stackTrace) {
+                print('Error pre-caching image in didChangeDependencies: $exception');
+              },
+            );
+          }
+        }
       });
-      
-      // Store this data in SharedPreferences
-      _saveCurrentUserData(args);
-      
-      // Reload profile image
-      _loadProfileImage();
-    } else {
-      // Refresh data from SharedPreferences
-      _loadUserData();
-      _loadProfileImage();
     }
-  }
-
-  Future<void> _saveCurrentUserData(Map<String, dynamic> userData) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final lectureNumber = userData['lectureNumber'] ?? '';
-      
-      if (lectureNumber.isNotEmpty) {
-        // Save all lecturer data in a single key
-        final lecturerKey = 'lecturer_data_$lectureNumber';
-        await prefs.setString(lecturerKey, json.encode(userData));
-        
-        // Set current active lecturer
-        await prefs.setString('current_lecture_number', lectureNumber);
-        
-        // Also save individual fields for backward compatibility
-        await prefs.setString('lecturer_name_$lectureNumber', userData['name'] ?? '');
-        await prefs.setString('lecturer_department_$lectureNumber', userData['department'] ?? '');
-        await prefs.setString('lecturer_occupation_$lectureNumber', userData['occupation'] ?? '');
-        await prefs.setString('lecturer_employment_type_$lectureNumber', userData['employmentType'] ?? '');
-        await prefs.setString('lecturer_gender_$lectureNumber', userData['gender'] ?? '');
-      }
-    } catch (e) {
-      print('Error saving lecturer data: $e');
+    
+    // Ensure we have the latest data, including profile image
+    if (_profileImageUrl == null || _profileImageUrl!.isEmpty) {
+      _loadUserData();
     }
   }
 
   Future<void> _loadUserData() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final lectureNumber = prefs.getString('current_lecture_number');
+      setState(() {
+        _isAvatarLoading = true;
+      });
+
+      // Get current user data from Supabase service
+      final userData = _supabaseService.getCurrentUser();
       
-      if (lectureNumber != null && lectureNumber.isNotEmpty) {
-        // Load data specific to this lecturer number
-        final lecturerKey = 'lecturer_data_$lectureNumber';
-        final userDataString = prefs.getString(lecturerKey);
+      if (userData != null && mounted) {
+        // First set basic user data
+        setState(() {
+          _email = userData['email'];
+          _lecturerName = userData['name'];
+          _department = userData['department'];
+          _occupation = userData['occupation'];
+          _employmentType = userData['employmentType'];
+          _gender = userData['gender'];
+        });
         
-        if (userDataString != null) {
-          final userData = json.decode(userDataString) as Map<String, dynamic>;
+        print('Loaded user data for dashboard: Name=$_lecturerName, Department=$_department');
+        
+        // Handle profile image with proper caching
+        if (userData.containsKey('profile_image_path') && 
+            userData['profile_image_path'] != null && 
+            userData['profile_image_path'].toString().isNotEmpty) {
+          
+          String imageUrl = userData['profile_image_path'];
+          
+          // Ensure URL is valid
+          if (imageUrl.startsWith('http')) {
+            print('Setting profile image from cached data: $imageUrl');
+            setState(() {
+              _profileImageUrl = imageUrl;
+            });
+            
+            // Pre-cache the image
+            precacheImage(
+              NetworkImage(imageUrl),
+              context,
+              onError: (exception, stackTrace) {
+                print('Error pre-caching image: $exception');
+                if (mounted) {
+                  setState(() {
+                    _profileImageUrl = null;
+                    _isAvatarLoading = false;
+                  });
+                }
+              },
+            );
+          }
+        }
+        
+        // Always sync with database to ensure we have latest image
+        if (userData.containsKey('email') && userData['email'] != null) {
+          String? lecturerId = userData['lecturer_id'];
+          String email = userData['email'];
+          
+          print('Syncing profile image for lecturer: $email');
+          final imageUrl = await _supabaseService.syncLecturerProfileImage(email, lecturerId);
+          
+          if (imageUrl != null && imageUrl.isNotEmpty && mounted) {
+            print('Synced profile image URL from storage: $imageUrl');
+            if (imageUrl.startsWith('http')) {
+              // Clear image cache before setting new URL
+              imageCache.clear();
+              imageCache.clearLiveImages();
+              
+              setState(() {
+                _profileImageUrl = imageUrl;
+              });
+              
+              // Pre-cache the new image
+              precacheImage(
+                NetworkImage(imageUrl),
+                context,
+                onError: (exception, stackTrace) {
+                  print('Error pre-caching synced image: $exception');
+                },
+              );
+              
+              // Update in-memory cache
+              _supabaseService.updateCurrentUserCache({
+                'profile_image_path': imageUrl
+              });
+            }
+          }
+        }
+      } else {
+        print('No user data available - user not logged in');
+      }
+    } catch (e) {
+      print('Error loading user data: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isAvatarLoading = false;
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    // Cancel image refresh timer
+    _imageRefreshTimer?.cancel();
+    
+    // Existing dispose code...
+    WidgetsBinding.instance.removeObserver(this);
+    _clockTimer?.cancel();
+    _connectivitySubscription.cancel();
+    
+    _locationUpdateTimer?.cancel();
+    
+    super.dispose();
+  }
+
+  void _scheduleImageUrlRefresh() {
+    // Cancel any existing timer
+    _imageRefreshTimer?.cancel();
+    
+    // Schedule refresh every 30 minutes
+    _imageRefreshTimer = Timer.periodic(Duration(minutes: 30), (timer) {
+      if (mounted) {
+        _refreshProfileImage();
+      }
+    });
+  }
+
+  Future<void> _refreshProfileImage() async {
+    setState(() {
+      _isAvatarLoading = true;
+    });
+    
+    try {
+      final userData = _supabaseService.getCurrentUser();
+      if (userData == null) {
+      setState(() {
+          _profileImageUrl = null;
+          _isAvatarLoading = false;
+        });
+        return;
+      }
+
+      String? imagePath = userData['profile_image_path'];
+      
+      if (imagePath != null && imagePath.isNotEmpty && imagePath.startsWith('http')) {
+        print('Loading profile image from path: $imagePath');
+        
+        // Clear existing image cache to ensure we load the latest version
+          PaintingBinding.instance.imageCache.clear();
+          PaintingBinding.instance.imageCache.clearLiveImages();
+          
           setState(() {
-            _lectureNumber = lectureNumber;
-            _lecturerName = userData['name'];
-            _department = userData['department'];
-            _occupation = userData['occupation'];
-            _employmentType = userData['employmentType'];
-            _gender = userData['gender'];
+          _profileImageUrl = imagePath;
+          _isAvatarLoading = false;
+        });
+        
+        // Also refresh the image URL in the database to ensure it's current
+        _supabaseService.syncLecturerProfileImage(
+          userData['email'],
+          userData['lecturer_id']
+        ).then((updatedUrl) {
+          if (updatedUrl != null && updatedUrl != imagePath && updatedUrl.startsWith('http')) {
+            setState(() {
+              _profileImageUrl = updatedUrl;
+            });
+            }
           });
         } else {
-          // Fallback to individual keys if combined data doesn't exist
-          setState(() {
-            _lectureNumber = lectureNumber;
-            _lecturerName = prefs.getString('lecturer_name_$lectureNumber');
-            _department = prefs.getString('lecturer_department_$lectureNumber');
-            _occupation = prefs.getString('lecturer_occupation_$lectureNumber');
-            _employmentType = prefs.getString('lecturer_employment_type_$lectureNumber');
-            _gender = prefs.getString('lecturer_gender_$lectureNumber');
-          });
-        }
+        print('No profile image path found');
+        setState(() {
+          _profileImageUrl = null;
+          _isAvatarLoading = false;
+        });
       }
     } catch (e) {
-      print('Error loading lecturer data: $e');
+      print('Error loading profile image: $e');
+      setState(() {
+        _profileImageUrl = null;
+        _isAvatarLoading = false;
+      });
     }
-  }
-
-  // Show logout confirmation dialog
-  void _showLogoutConfirmationDialog() {
-    final dialogBackgroundColor = _isDarkMode ? Color(0xFF1F2937) : Colors.white;
-    final dialogTextColor = _isDarkMode ? Colors.white : Colors.black87;
-    final buttonTextColor = _isDarkMode ? Colors.lightBlue : Colors.blue;
-    
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          backgroundColor: dialogBackgroundColor,
-          title: Text(
-            'Confirm Sign Out',
-            style: TextStyle(color: dialogTextColor),
-          ),
-          content: Text(
-            'Are you sure you want to sign out? This will clear all your session data.',
-            style: TextStyle(color: dialogTextColor.withOpacity(0.9)),
-          ),
-          actions: <Widget>[
-            TextButton(
-              child: Text(
-                'Cancel',
-                style: TextStyle(color: buttonTextColor),
-              ),
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
-            ),
-            TextButton(
-              child: Text(
-                'Sign Out',
-                style: TextStyle(color: _isDarkMode ? Colors.red[300] : Colors.red),
-              ),
-              onPressed: () async {
-                Navigator.of(context).pop();
-                await _clearUserData();
-                Navigator.pushReplacementNamed(context, '/role-selection');
-              },
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  // Method to clear user data from SharedPreferences
-  Future<void> _clearUserData() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final userLectureNumber = _lectureNumber ?? prefs.getString('current_lecture_number');
-      
-      if (userLectureNumber != null) {
-        // Remove profile image
-        final imagePath = prefs.getString('profile_image_path_$userLectureNumber');
-        if (imagePath != null) {
-          final file = File(imagePath);
-          if (await file.exists()) {
-            await file.delete();
-          }
-          await prefs.remove('profile_image_path_$userLectureNumber');
-        }
-        
-        // Remove all lecturer-specific data
-        await prefs.remove('lecturer_data_$userLectureNumber');
-        await prefs.remove('lecturer_name_$userLectureNumber');
-        await prefs.remove('lecturer_department_$userLectureNumber');
-        await prefs.remove('lecturer_occupation_$userLectureNumber');
-        await prefs.remove('lecturer_employment_type_$userLectureNumber');
-        await prefs.remove('lecturer_gender_$userLectureNumber');
-      }
-      
-      // Clear current session data
-      await prefs.remove('current_lecture_number');
-      await prefs.remove('isLoggedIn');
-      await prefs.remove('user_type');
-      
-      print('Lecturer data cleared for $userLectureNumber');
-    } catch (e) {
-      print('Error clearing lecturer data: $e');
-    }
-  }
-
-  Future<bool> _onWillPop() async {
-    final dialogBackgroundColor = _isDarkMode ? Color(0xFF1F2937) : Colors.white;
-    final dialogTextColor = _isDarkMode ? Colors.white : Colors.black87;
-    final accentColor = _isDarkMode ? Colors.pink[300] : Colors.pink[200];
-    
-    bool shouldPop = await showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: dialogBackgroundColor,
-        title: Text(
-          'Leaving so soon?',
-          style: TextStyle(color: dialogTextColor),
-        ),
-        content: Text(
-          'Have you finished exploring the app? You\'re welcome back any time.',
-          style: TextStyle(color: dialogTextColor.withOpacity(0.8)),
-        ),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: Text(
-              'I\'m still exploring',
-              style: TextStyle(color: accentColor),
-            ),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.of(context).pop(true);
-              Navigator.pushReplacementNamed(context, '/role-selection');
-            },
-            child: Text(
-              'I\'d like to leave',
-              style: TextStyle(color: _isDarkMode ? Colors.white : Colors.black87),
-            ),
-          ),
-        ],
-      ),
-    );
-    
-    return shouldPop;
   }
 
   @override
   Widget build(BuildContext context) {
-    final primaryColor = Colors.blue; // Always use blue for primary color
+    final primaryColor = Colors.blue;
     final backgroundColor = _isDarkMode ? Color(0xFF111827) : Colors.white;
     final textColor = _isDarkMode ? Colors.white : Colors.black87;
     
@@ -356,7 +377,11 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
                 width: double.infinity,
                 padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
                 decoration: BoxDecoration(
-                  color: Colors.blue, // Always blue regardless of theme
+                  color: Colors.blue,
+                  borderRadius: BorderRadius.only(
+                    bottomLeft: Radius.circular(20),
+                    bottomRight: Radius.circular(20),
+                  ),
                   boxShadow: [
                     BoxShadow(
                       color: Colors.black.withOpacity(0.1),
@@ -371,40 +396,7 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // Profile picture with online indicator
-                        Stack(
-                          children: [
-                            CircleAvatar(
-                              radius: 30,
-                              backgroundColor: Colors.white,
-                              backgroundImage: _profileImage != null 
-                                ? FileImage(_profileImage!) 
-                                : null,
-                              child: _profileImage == null 
-                                ? Icon(Icons.person, size: 30, color: Colors.blue) 
-                                : null,
-                            ),
-                            Positioned(
-                              bottom: 0,
-                              right: 0,
-                              child: Container(
-                                padding: EdgeInsets.all(2),
-                                decoration: BoxDecoration(
-                                  color: Colors.white,
-                                  shape: BoxShape.circle,
-                                ),
-                                child: Container(
-                                  height: 8,
-                                  width: 8,
-                                  decoration: BoxDecoration(
-                                    color: _isOnline ? Colors.green : Colors.grey,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
+                        _buildProfileImage(),
                         SizedBox(width: 12),
                         
                         // Greeting and name section
@@ -431,7 +423,7 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
                                 ],
                               ),
                               Text(
-                                '${_lecturerName ?? ''}',
+                                _lecturerName ?? '',
                                 style: const TextStyle(
                                   fontSize: 20,
                                   fontWeight: FontWeight.bold,
@@ -453,11 +445,32 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          // Email
+                          RichText(
+                            text: TextSpan(
+                              style: TextStyle(
+                                fontSize: 15,
+                                color: Colors.white,
+                              ),
+                              children: [
+                                TextSpan(
+                                  text: 'Email: ',
+                                  style: TextStyle(fontWeight: FontWeight.w500),
+                                ),
+                                TextSpan(
+                                  text: _email ?? 'Not set',
+                                ),
+                              ],
+                            ),
+                            overflow: TextOverflow.visible,
+                          ),
+                          SizedBox(height: 2),
+                          
                           // Department with text wrapping support
                           RichText(
                             text: TextSpan(
                               style: TextStyle(
-                                fontSize: 15, // Slightly larger
+                                fontSize: 15,
                                 color: Colors.white,
                               ),
                               children: [
@@ -472,7 +485,7 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
                             ),
                             overflow: TextOverflow.visible,
                           ),
-                          SizedBox(height: 2), // Reduced spacing
+                          SizedBox(height: 2),
                           
                           // Gender
                           RichText(
@@ -641,24 +654,30 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
                       crossAxisCount: 2,
                       shrinkWrap: true,
                       physics: NeverScrollableScrollPhysics(),
-                      childAspectRatio: 1.1,
+                      childAspectRatio: 0.95,
                       mainAxisSpacing: 12,
                       crossAxisSpacing: 12,
                       children: [
                         _buildMenuItem(
-                          icon: Icons.qr_code_2,
+                          assetPath: 'assets/images/lecture icons/create qr.png',
                           title: 'Create QR Code',
                           color: Colors.blue,
                           route: AppRoutes.createPage,
                         ),
                         _buildMenuItem(
-                          icon: Icons.edit,
+                          assetPath: 'assets/images/lecture icons/manual entry.png',
                           title: 'Manual Entry',
                           color: Colors.orange,
                           route: AppRoutes.manualEntryPage,
                         ),
                         _buildMenuItem(
-                          icon: Icons.people,
+                          assetPath: 'assets/images/lecture icons/pin location.png',
+                          title: 'Pin Location',
+                          color: Colors.purple,
+                          route: AppRoutes.pinLocationPage,
+                        ),
+                        _buildMenuItem(
+                          assetPath: 'assets/images/lecture icons/reports.png',
                           title: 'Attendees Logs',
                           color: Colors.green,
                           route: AppRoutes.historyPage,
@@ -684,27 +703,33 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
                       crossAxisCount: 2,
                       shrinkWrap: true,
                       physics: NeverScrollableScrollPhysics(),
-                      childAspectRatio: 1.1,
+                      childAspectRatio: 0.95,
                       mainAxisSpacing: 12,
                       crossAxisSpacing: 12,
                       children: [
                         _buildMenuItem(
-                          icon: Icons.book,
+                          assetPath: 'assets/images/lecture icons/assign unit.png',
                           title: 'Get Assigned Units',
                           color: Colors.blue,
                           route: AppRoutes.getAssignedUnitsPage,
                         ),
                         _buildMenuItem(
-                          icon: Icons.calendar_today,
+                          assetPath: 'assets/images/lecture icons/schedules.png',
                           title: 'Schedules',
                           color: Colors.red,
                           route: AppRoutes.lecturerSchedulesPage,
                         ),
                         _buildMenuItem(
-                          icon: Icons.notifications,
+                          assetPath: 'assets/images/lecture icons/notifications.png',
                           title: 'Notifications & Alerts',
                           color: Colors.amber,
                           route: AppRoutes.lecturerNotificationsPage,
+                        ),
+                        _buildMenuItem(
+                          assetPath: 'assets/images/lecture icons/evaluate lecture.png',
+                          title: 'Analysis',
+                          color: Colors.teal,
+                          route: AppRoutes.analysisPage,
                         ),
                       ],
                     ),
@@ -727,12 +752,12 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
                       crossAxisCount: 2,
                       shrinkWrap: true,
                       physics: NeverScrollableScrollPhysics(),
-                      childAspectRatio: 1.1,
+                      childAspectRatio: 0.95,
                       mainAxisSpacing: 12,
                       crossAxisSpacing: 12,
                       children: [
                         _buildMenuItem(
-                          icon: Icons.check_circle,
+                          assetPath: 'assets/images/lecture icons/enter cat marks.png',
                           title: 'Enter CAT Marks',
                           color: Colors.green,
                           route: AppRoutes.catMarksEntryPage,
@@ -762,39 +787,7 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
                 color: Color(0xFF172A45),
                 child: Row(
                   children: [
-                    Stack(
-                      children: [
-                        CircleAvatar(
-                          radius: 30,
-                          backgroundColor: Colors.white,
-                          backgroundImage: _profileImage != null 
-                            ? FileImage(_profileImage!) 
-                            : null,
-                          child: _profileImage == null 
-                            ? Icon(Icons.person, size: 30, color: Color(0xFF0A192F)) 
-                            : null,
-                        ),
-                        Positioned(
-                          bottom: 0,
-                          right: 0,
-                          child: Container(
-                            padding: EdgeInsets.all(2),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              shape: BoxShape.circle,
-        ),
-        child: Container(
-                              height: 14,
-                              width: 14,
-                              decoration: BoxDecoration(
-                                color: _isOnline ? Colors.green : Colors.grey,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+                    _buildProfileImage(radius: 35),
                     SizedBox(width: 16),
                     Expanded(
                       child: Column(
@@ -810,7 +803,7 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
                             overflow: TextOverflow.ellipsis,
                           ),
                           Text(
-                            _lectureNumber ?? '',
+                            _email ?? '',
                             style: TextStyle(
                               color: Colors.white.withOpacity(0.8),
                               fontSize: 13,
@@ -867,13 +860,13 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
                           context,
                           AppRoutes.viewPage,
                           arguments: {
-                            'email': _lectureNumber,
+                            'email': _email,
                             'name': _lecturerName,
                             'department': _department,
                             'course': _department,
                             'year': '',
                             'semester': '',
-                            'lectureNumber': _lectureNumber,
+                            'lectureNumber': _email,
                             'occupation': _occupation,
                             'employmentType': _employmentType,
                             'gender': _gender,
@@ -890,8 +883,8 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
                           context,
                           AppRoutes.updateLecturerDetails,
                           arguments: {
-                            'email': _lectureNumber, // For backward compatibility
-                            'lectureNumber': _lectureNumber,
+                            'email': _email, // For backward compatibility
+                            'lectureNumber': _email,
                             'name': _lecturerName,
                             'department': _department,
                             'occupation': _occupation,
@@ -935,82 +928,96 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
   }
 
   Widget _buildMenuItem({
-    required IconData icon,
+    IconData? icon,
+    String? assetPath,
     required String title,
     required Color color,
     required String route,
   }) {
-    return Card(
-      elevation: 3,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: InkWell(
-        onTap: () {
-          // Check location before navigating
-          _checkLocationBeforeNavigating(() {
-            // Use the original route constants and parameter format to ensure compatibility
-            if (route == AppRoutes.createPage) {
-              Navigator.pushNamed(context, route, arguments: {
-                'email': _lectureNumber, // For backward compatibility
-                'lectureNumber': _lectureNumber,
+    final textColor = _isDarkMode ? Colors.white : Colors.black87;
+    
+    return InkWell(
+      onTap: () {
+        _checkLocationBeforeNavigating(() {
+          if (route == AppRoutes.createPage) {
+            Navigator.pushNamed(context, route, arguments: {
+              'email': _email,
+              'lectureNumber': _email,
+              'name': _lecturerName,
+              'department': _department,
+              'occupation': _occupation,
+              'employmentType': _employmentType,
+              'gender': _gender,
+            });
+          } else if (route == AppRoutes.historyPage) {
+            Navigator.pushNamed(context, route, arguments: {
+              'email': _email,
+              'lectureNumber': _email,
+              'name': _lecturerName,
+              'department': _department,
+              'occupation': _occupation,
+              'employmentType': _employmentType,
+              'gender': _gender,
+            });
+          } else {
+            Navigator.pushNamed(
+              context,
+              route,
+              arguments: {
+                'email': _email,
+                'lectureNumber': _email,
                 'name': _lecturerName,
                 'department': _department,
                 'occupation': _occupation,
                 'employmentType': _employmentType,
                 'gender': _gender,
-              });
-            } else if (route == AppRoutes.historyPage) {
-              Navigator.pushNamed(context, route, arguments: {
-                'email': _lectureNumber, // For backward compatibility
-                'lectureNumber': _lectureNumber,
-                'name': _lecturerName,
-                'department': _department,
-                'occupation': _occupation,
-                'employmentType': _employmentType,
-                'gender': _gender,
-              });
-            } else {
-              Navigator.pushNamed(
-                context,
-                route,
-                arguments: {
-                  'email': _lectureNumber, // For backward compatibility
-                  'lectureNumber': _lectureNumber,
-                  'name': _lecturerName,
-                  'department': _department,
-                  'occupation': _occupation,
-                  'employmentType': _employmentType,
-                  'gender': _gender,
-                },
-              );
-            }
-          });
-        },
-        borderRadius: BorderRadius.circular(16),
+              },
+            );
+          }
+        });
+      },
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+        decoration: BoxDecoration(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+        ),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              padding: EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: color.withOpacity(0.2),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                icon,
-                size: 30,
-                color: color,
+            Expanded(
+              flex: 3,
+              child: Container(
+                padding: EdgeInsets.all(8),
+                child: assetPath != null
+                  ? Image.asset(
+                      assetPath,
+                      fit: BoxFit.contain,
+                    )
+                  : Icon(
+                      icon ?? Icons.error,
+                      size: 45,
+                      color: color,
+                    ),
               ),
             ),
-            SizedBox(height: 8),
-            Text(
-              title, 
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w500,
+            Expanded(
+              flex: 2,
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: 4),
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: textColor,
+                  ),
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-              textAlign: TextAlign.center,
             ),
           ],
         ),
@@ -1233,176 +1240,151 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
     );
   }
 
-  @override
-  void dispose() {
-    // Unregister the observer
-    WidgetsBinding.instance.removeObserver(this);
-    
-    // Cancel timers
-    _clockTimer?.cancel();
-    
-    // Cancel connectivity subscription
-    _connectivitySubscription.cancel();
-    
-    super.dispose();
-  }
-
-  // Load profile image
-  Future<void> _loadProfileImage() async {
+  // Load dark mode preference
+  Future<void> _loadDarkModePreference() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final userLectureNumber = _lectureNumber ?? prefs.getString('current_lecture_number');
-      
-      if (userLectureNumber != null) {
-        final imagePath = prefs.getString('profile_image_path_$userLectureNumber');
+            setState(() {
+        _isDarkMode = prefs.getBool('dark_mode_enabled') ?? false;
+        });
+    } catch (e) {
+      print('Error loading dark mode preference: $e');
+    }
+  }
+
+  // Save dark mode preference
+  Future<void> _saveDarkModePreference(bool value) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('dark_mode_enabled', value);
+    } catch (e) {
+      print('Error saving dark mode preference: $e');
+    }
+  }
+
+  // Show logout confirmation dialog
+  void _showLogoutConfirmationDialog() {
+    final dialogBackgroundColor = _isDarkMode ? Color(0xFF1F2937) : Colors.white;
+    final dialogTextColor = _isDarkMode ? Colors.white : Colors.black87;
+    final buttonTextColor = _isDarkMode ? Colors.lightBlue : Colors.blue;
+    
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: dialogBackgroundColor,
+          title: Text(
+            'Confirm Sign Out',
+            style: TextStyle(color: dialogTextColor),
+          ),
+          content: Text(
+            'Are you sure you want to sign out? This will clear all your session data.',
+            style: TextStyle(color: dialogTextColor.withOpacity(0.9)),
+          ),
+          actions: <Widget>[
+            TextButton(
+              child: Text(
+                'Cancel',
+                style: TextStyle(color: buttonTextColor),
+              ),
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+            ),
+            TextButton(
+              child: Text(
+                'Sign Out',
+                style: TextStyle(color: _isDarkMode ? Colors.red[300] : Colors.red),
+              ),
+              onPressed: () async {
+                Navigator.of(context).pop();
+                await _clearUserData();
+                Navigator.pushReplacementNamed(context, '/role-selection');
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // Method to clear user data from SharedPreferences
+  Future<void> _clearUserData() async {
+    try {
+        final prefs = await SharedPreferences.getInstance();
+      final userLectureNumber = _email ?? prefs.getString('current_lecture_number');
         
-        if (imagePath != null && userLectureNumber == _lectureNumber) {
+      if (userLectureNumber != null) {
+        // Remove profile image
+        final imagePath = prefs.getString('profile_image_path_$userLectureNumber');
+        if (imagePath != null) {
           final file = File(imagePath);
           if (await file.exists()) {
-            setState(() {
-              _profileImage = file;
-            });
-            print('Loaded profile image from: $imagePath for $userLectureNumber');
-          } else {
-            print('Profile image file does not exist: $imagePath');
-            setState(() {
-              _profileImage = null;
-            });
+            await file.delete();
           }
-        } else {
-          print('No profile image path found for lecturer: $userLectureNumber');
-          setState(() {
-            _profileImage = null;
-          });
+          await prefs.remove('profile_image_path_$userLectureNumber');
         }
-      } else {
-        print('Cannot load profile image: lecture number is null');
-        setState(() {
-          _profileImage = null;
-        });
+        
+        // Remove all lecturer-specific data
+        await prefs.remove('lecturer_data_$userLectureNumber');
+        await prefs.remove('lecturer_name_$userLectureNumber');
+        await prefs.remove('lecturer_department_$userLectureNumber');
+        await prefs.remove('lecturer_occupation_$userLectureNumber');
+        await prefs.remove('lecturer_employment_type_$userLectureNumber');
+        await prefs.remove('lecturer_gender_$userLectureNumber');
       }
-    } catch (e) {
-      print('Error loading profile image: $e');
-      setState(() {
-        _profileImage = null;
-      });
-    }
-  }
-
-  // Save profile image
-  Future<void> _saveProfileImagePath(String path) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final userLectureNumber = _lectureNumber ?? prefs.getString('current_lecture_number');
       
-      if (userLectureNumber != null) {
-        await prefs.setString('profile_image_path_$userLectureNumber', path);
-        print('Saved profile image path for $userLectureNumber: $path');
-      } else {
-        print('Cannot save profile image path: lecture number is null');
-      }
-    } catch (e) {
-      print('Error saving profile image path: $e');
-    }
-  }
-
-  // Pick and update profile image
-  Future<void> _pickProfileImage() async {
-    try {
-      final picker = ImagePicker();
-      final pickedFile = await picker.pickImage(
-        source: ImageSource.gallery,
-        imageQuality: 80
-      );
+      // Clear current session data
+      await prefs.remove('current_lecture_number');
+      await prefs.remove('isLoggedIn');
+      await prefs.remove('user_type');
       
-      if (pickedFile != null) {
-        final prefs = await SharedPreferences.getInstance();
-        final userLectureNumber = _lectureNumber ?? prefs.getString('current_lecture_number');
-        
-        if (userLectureNumber == null || userLectureNumber.isEmpty) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Error: User not logged in properly'),
-              backgroundColor: Colors.red,
-            ),
-          );
-          return;
-        }
-        
-        final directory = await getApplicationDocumentsDirectory();
-        final path = '${directory.path}/profile_images';
-        
-        final dir = Directory(path);
-        if (!await dir.exists()) {
-          await dir.create(recursive: true);
-        }
-        
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final sanitizedLectureNumber = userLectureNumber.replaceAll(RegExp(r'[^\w\s\.]'), '_');
-        final profileImagePath = '$path/profile_${sanitizedLectureNumber}_$timestamp.jpg';
-        
-        try {
-          final oldImagePath = prefs.getString('profile_image_path_$userLectureNumber');
-          if (oldImagePath != null) {
-            final oldFile = File(oldImagePath);
-            if (await oldFile.exists()) {
-              await oldFile.delete();
-              print('Deleted old profile image: $oldImagePath');
-            }
-          }
+      print('Lecturer data cleared for $userLectureNumber');
         } catch (e) {
-          print('Error deleting old profile image: $e');
+      print('Error clearing lecturer data: $e');
         }
-        
-        await File(pickedFile.path).copy(profileImagePath);
-        
-        final savedFile = File(profileImagePath);
-        setState(() {
-          _profileImage = savedFile;
-        });
-        
-        await _saveProfileImagePath(profileImagePath);
-        
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Profile image updated successfully for $userLectureNumber'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
-    } catch (e) {
-      print('Error picking profile image: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error updating profile image: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
-    }
   }
 
-  // Check internet connectivity
-  Future<void> _checkConnectivity() async {
-    try {
-      final result = await Connectivity().checkConnectivity();
-      _updateConnectionStatus(result);
-    } catch (e) {
-      print('Error checking connectivity: $e');
-    }
-  }
-
-  // Update connectivity status
-  void _updateConnectionStatus(ConnectivityResult result) {
-    final wasOffline = !_isOnline;
-    setState(() {
-      _isOnline = result != ConnectivityResult.none;
-    });
+  Future<bool> _onWillPop() async {
+    final dialogBackgroundColor = _isDarkMode ? Color(0xFF1F2937) : Colors.white;
+    final dialogTextColor = _isDarkMode ? Colors.white : Colors.black87;
+    final accentColor = _isDarkMode ? Colors.pink[300] : Colors.pink[200];
     
-    // If we were offline but now we're online, refresh the location
-    if (wasOffline && _isOnline) {
-      print('Connectivity restored, refreshing location...');
-      _getCurrentLocation();
-    }
+    bool shouldPop = await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: dialogBackgroundColor,
+        title: Text(
+          'Leaving so soon?',
+          style: TextStyle(color: dialogTextColor),
+        ),
+        content: Text(
+          'Have you finished exploring the app? You\'re welcome back any time.',
+          style: TextStyle(color: dialogTextColor.withOpacity(0.8)),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text(
+              'I\'m still exploring',
+              style: TextStyle(color: accentColor),
+            ),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(context).pop(true);
+              Navigator.pushReplacementNamed(context, '/role-selection');
+            },
+            child: Text(
+              'I\'d like to leave',
+              style: TextStyle(color: _isDarkMode ? Colors.white : Colors.black87),
+            ),
+          ),
+        ],
+      ),
+    );
+    
+    return shouldPop;
   }
 
   // Get greeting based on time of day
@@ -1610,7 +1592,7 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
           print('Retry $retryCount: Error getting location: $e');
           
           if (retryCount >= maxRetries) {
-            throw e; // Re-throw after max retries
+            rethrow; // Re-throw after max retries
           }
           
           // Wait before retrying
@@ -1673,7 +1655,7 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
       
       if (locationName.length > 20) {
         // Ensure it doesn't get too long and cause overflow
-        locationName = locationName.substring(0, 18) + "..";
+        locationName = "${locationName.substring(0, 18)}..";
       }
       
       setState(() {
@@ -1691,5 +1673,298 @@ class _LecturerDashboardScreenState extends State<LecturerDashboardScreen> with 
         }
       });
     }
+  }
+
+  // Add missing methods
+  void _startClock() {
+    _updateTime();
+    _clockTimer = Timer.periodic(Duration(seconds: 1), (timer) {
+      if (mounted) {
+        _updateTime();
+      }
+    });
+  }
+
+  Future<void> _checkConnectivity() async {
+    try {
+      final result = await Connectivity().checkConnectivity();
+      _updateConnectionStatus(result);
+    } catch (e) {
+      print('Error checking connectivity: $e');
+    }
+  }
+
+  void _setupConnectivityStream() {
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen((ConnectivityResult result) {
+      _updateConnectionStatus(result);
+    });
+  }
+
+  Future<void> _refreshAllData() async {
+    try {
+      setState(() {
+        _isLoading = true;
+      });
+      
+      final userData = _supabaseService.getCurrentUser();
+      if (userData != null) {
+        setState(() {
+          _email = userData['email'];
+          _lecturerName = userData['name'];
+          _department = userData['department'];
+          _occupation = userData['occupation'];
+          _employmentType = userData['employmentType'];
+          _gender = userData['gender'];
+          _profileImageUrl = userData['profile_image_path'];
+        });
+      }
+
+      // Also refresh location
+      _getCurrentLocation();
+    } catch (e) {
+      print('Error refreshing data: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error refreshing data: $e'),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 3),
+        ),
+      );
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _updateConnectionStatus(ConnectivityResult result) {
+    final wasOffline = !_isOnline;
+    setState(() {
+      _isOnline = result != ConnectivityResult.none;
+    });
+    
+    // If we were offline but now we're online, refresh the location
+    if (wasOffline && _isOnline) {
+      print('Connectivity restored, refreshing location...');
+      _getCurrentLocation();
+    }
+  }
+
+  Widget _buildProfileImage({double radius = 30}) {
+    return GestureDetector(
+      onTap: _pickProfileImage,
+      child: Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 2),
+        ),
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // Base CircleAvatar with placeholder
+            CircleAvatar(
+              radius: radius,
+              backgroundColor: Colors.grey[200],
+              child: _profileImageUrl == null || _profileImageUrl!.isEmpty
+                  ? Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.add_a_photo_outlined,
+                          size: radius * 0.67,
+                          color: Colors.grey[600],
+                        ),
+                        if (radius >= 30) ...[
+                          SizedBox(height: 2),
+                          Text(
+                            'Add',
+                            style: TextStyle(
+                              fontSize: radius * 0.33,
+                              color: Colors.grey[600],
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ],
+                    )
+                  : null,
+            ),
+            
+            // Profile image with error handling
+            if (_profileImageUrl != null && _profileImageUrl!.isNotEmpty)
+              CircleAvatar(
+                radius: radius,
+                backgroundColor: Colors.transparent,
+                backgroundImage: NetworkImage(_profileImageUrl!),
+                onBackgroundImageError: (exception, stackTrace) {
+                  print('Error loading profile image: $exception');
+                  setState(() {
+                    _profileImageUrl = null;
+                  });
+                },
+              ),
+              
+            // Loading indicator
+            if (_isAvatarLoading)
+              Container(
+                width: radius * 2,
+                height: radius * 2,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                  color: Colors.black.withOpacity(0.5),
+                ),
+                child: Center(
+                  child: SizedBox(
+                    width: radius,
+                    height: radius,
+                    child: CircularProgressIndicator(
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      strokeWidth: 2,
+                ),
+              ),
+            ),
+          ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickProfileImage() async {
+    try {
+      final ImagePicker picker = ImagePicker();
+      final XFile? image = await picker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 500,
+        maxHeight: 500,
+        imageQuality: 85,
+      );
+      
+      if (image == null) return;
+      
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Uploading profile image...'),
+              ],
+            ),
+          );
+        },
+      );
+      
+      // Upload image to Supabase
+      final File imageFile = File(image.path);
+      final result = await _supabaseService.uploadLecturerProfileImage(imageFile);
+      
+      if (!mounted) return;
+      
+      // Dismiss loading dialog
+      Navigator.of(context).pop();
+      
+      if (result['success']) {
+        print('Successfully uploaded image, refreshing UI with new image: ${result['imagePath']}');
+        
+        // Clear existing image cache
+        PaintingBinding.instance.imageCache.clear();
+        PaintingBinding.instance.imageCache.clearLiveImages();
+        
+        // Force profile image reload from Supabase with a small delay
+        setState(() {
+          // First set loading state
+          _isAvatarLoading = true;
+          
+          // Clear current image
+          _profileImageUrl = null;
+        });
+        
+        // Delay slightly to ensure state updates fully propagate
+        Future.delayed(Duration(milliseconds: 300), () {
+          if (mounted) {
+            _refreshProfileImage();
+          }
+        });
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Profile image updated successfully'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to update profile image: ${result['message']}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      print('Error picking profile image: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error updating profile image'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  // Initialize location immediately on startup
+  Future<void> _initializeLocationImmediate() async {
+    try {
+      // First check if location services are enabled at system level
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      
+      if (!serviceEnabled) {
+        // Show dialog to force location enabling
+        _showEnableLocationDialog();
+        return;
+      }
+      
+      // Check permission
+      LocationPermission permission = await Geolocator.checkPermission();
+      
+      if (permission == LocationPermission.denied) {
+        // Request permission
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          // Show dialog to force permission
+          _showLocationPermissionRequiredDialog();
+          return;
+        }
+      }
+      
+      if (permission == LocationPermission.deniedForever) {
+        // Show dialog that app cannot work without permission
+        _showPermanentlyDeniedLocationDialog();
+        return;
+      }
+      
+      // If we're here, we have permission, so get location
+      _getCurrentLocation();
+    } catch (e) {
+      print('Error initializing location: $e');
+    }
+  }
+
+  // Set up periodic location updates
+  Timer? _locationUpdateTimer;
+  
+  void _startLocationUpdateTimer() {
+    _locationUpdateTimer?.cancel();
+    // Update location every 5 minutes
+    _locationUpdateTimer = Timer.periodic(Duration(minutes: 5), (timer) {
+      if (mounted) {
+        _getCurrentLocation();
+      }
+    });
   }
 } 

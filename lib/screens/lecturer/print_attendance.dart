@@ -13,7 +13,7 @@ class PrintAttendance extends StatefulWidget {
   final String? semester;
 
   const PrintAttendance({
-    Key? key,
+    super.key,
     required this.unitCode,
     required this.unitName,
     required this.date,
@@ -22,7 +22,7 @@ class PrintAttendance extends StatefulWidget {
     this.department,
     this.course,
     this.semester,
-  }) : super(key: key);
+  });
 
   @override
   _PrintAttendanceState createState() => _PrintAttendanceState();
@@ -177,7 +177,7 @@ class _PrintAttendanceState extends State<PrintAttendance> {
     if (unitCode.length >= 3) {
       // Extract the numeric part (e.g., "208" from "ACSC208")
       final numericPart = RegExp(r'[0-9]+').stringMatch(unitCode) ?? '';
-      if (numericPart.isNotEmpty && numericPart.length >= 1) {
+      if (numericPart.isNotEmpty && numericPart.isNotEmpty) {
         // First digit typically indicates the year
         final yearDigit = int.tryParse(numericPart[0]);
         if (yearDigit != null) {

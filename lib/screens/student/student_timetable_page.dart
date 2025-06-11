@@ -7,7 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:photo_view/photo_view.dart';
 
 class StudentTimetablePage extends StatefulWidget {
-  const StudentTimetablePage({Key? key}) : super(key: key);
+  const StudentTimetablePage({super.key});
 
   @override
   _StudentTimetablePageState createState() => _StudentTimetablePageState();

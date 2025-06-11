@@ -6,10 +6,10 @@ import 'dart:convert';
 /// This ensures Print Attendance and Analyze Attendance use the same data structure
 class AttendanceUtils {
   // Set to false for production
-  static bool _debugMode = false;
+  static final bool _debugMode = false;
   
   // Set to true to use mock data when no real data is found (production fallback)
-  static bool _useMockDataIfEmpty = true;
+  static final bool _useMockDataIfEmpty = true;
   
   /// Fetches attendance data for a specific unit from SharedPreferences
   /// This method mimics the data fetching approach used in PrintAttendancePage
@@ -394,7 +394,7 @@ class AttendanceUtils {
       }
       
       // Calculate attendance percentage
-      final totalSessions = allSessions.length > 0 ? allSessions.length : 1;
+      final totalSessions = allSessions.isNotEmpty ? allSessions.length : 1;
       final double attendancePercentage = sessionsAttended / totalSessions;
       
       // Calculate hours attended (assuming 3 hours per session)

@@ -96,11 +96,11 @@ class EmailService {
                     <div style="text-align: center; margin-bottom: 20px;">
                       <h1 style="color: #3498db; margin: 0;">QR Code Attendance App</h1>
                     </div>
-                    <p style="font-size: 16px; color: #333;">Hello ${name},</p>
+                    <p style="font-size: 16px; color: #333;">Hello $name,</p>
                     <p style="font-size: 16px; color: #333;">Thank you for registering/attending for our QR Code Attendance app  for Tharaka university!</p>
                     <p style="font-size: 16px; color: #333;">To complete your registration and activate your account, please verify your email address by entering the following code in the app:</p>
                     <div style="background-color: #f7f7f7; padding: 15px; border-radius: 5px; text-align: center; margin: 20px 0;">
-                      <h2 style="margin: 0; color: #3498db; letter-spacing: 5px; font-size: 32px;">${otp}</h2>
+                      <h2 style="margin: 0; color: #3498db; letter-spacing: 5px; font-size: 32px;">$otp</h2>
                     </div>
                     <p style="font-size: 16px; color: #333;">This code will expire in 5 minutes.</p>
                     <p style="font-size: 16px; color: #333;">If you didn't create an account, please ignore this email.</p>

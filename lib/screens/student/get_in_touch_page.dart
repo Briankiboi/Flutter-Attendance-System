@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 class GetInTouchPage extends StatelessWidget {
-  const GetInTouchPage({Key? key}) : super(key: key);
+  const GetInTouchPage({super.key});
 
   @override
   Widget build(BuildContext context) {

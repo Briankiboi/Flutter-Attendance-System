@@ -18,21 +18,102 @@
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="A new Flutter project.">
+  <meta name="description" content="QR Code Attendance System Web Portal">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <!-- iOS meta tags & icons -->
-  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="final_project">
+  <meta name="apple-mobile-web-app-title" content="QR Attendance">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
   <!-- Favicon -->
   <link rel="icon" type="image/png" href="favicon.png"/>
 
-  <title>final_project</title>
+  <title>QR Code Attendance System</title>
   <link rel="manifest" href="manifest.json">
+
+  <script>
+    // The value below is injected by flutter build, do not touch.
+    var serviceWorkerVersion = null;
+  </script>
+  <!-- This script adds the flutter initialization JS code -->
+  <script src="flutter.js" defer></script>
+  <script>
+    window.addEventListener('load', function() {
+      // Download main.dart.js
+      _flutter.loader.loadEntrypoint({
+        serviceWorker: {
+          serviceWorkerVersion: serviceWorkerVersion,
+        },
+        onEntrypointLoaded: async function(engineInitializer) {
+          // Initialize the Flutter engine
+          let appRunner = await engineInitializer.initializeEngine({
+            // Optimize initial memory usage
+            initialMemory: 128 * 1024 * 1024, // Start with 128MB
+            renderer: 'html' // Use HTML renderer for faster initial load
+          });
+          // Run the app
+          await appRunner.runApp();
+        }
+      });
+    });
+  </script>
+  <style>
+    .loading {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      flex-direction: column;
+      background: linear-gradient(180deg, #BBDEFB 0%, #FFFFFF 100%);
+    }
+    .loading img {
+      width: 120px;
+      height: 120px;
+      margin-bottom: 20px;
+      animation: pulse 2s infinite;
+    }
+    .loading-text {
+      font-family: 'Roboto', sans-serif;
+      font-size: 24px;
+      color: #1976D2;
+      margin-top: 16px;
+    }
+    .progress {
+      width: 200px;
+      height: 4px;
+      background-color: #E3F2FD;
+      border-radius: 2px;
+      overflow: hidden;
+      position: relative;
+    }
+    .progress-bar {
+      position: absolute;
+      width: 40%;
+      height: 100%;
+      background-color: #1976D2;
+      border-radius: 2px;
+      animation: loading 1.5s infinite ease-in-out;
+    }
+    @keyframes pulse {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+      100% { transform: scale(1); }
+    }
+    @keyframes loading {
+      0% { left: -40%; }
+      100% { left: 100%; }
+    }
+  </style>
 </head>
 <body>
-  <script src="flutter_bootstrap.js" async></script>
+  <div class="loading">
+    <img src="icons/Icon-192.png" alt="Loading"/>
+    <div class="loading-text">Attendance System</div>
+    <div class="progress">
+      <div class="progress-bar"></div>
+    </div>
+  </div>
 </body>
 </html>

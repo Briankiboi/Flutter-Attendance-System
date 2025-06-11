@@ -1,13 +1,18 @@
+
 import 'package:flutter/material.dart';
 import 'package:qr_attendance/routes/app_routes.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
+import 'package:qr_attendance/services/supabase_service.dart';
+import 'package:qr_attendance/services/connectivity_service.dart';
+import 'package:qr_attendance/widgets/connectivity_message.dart';
+import 'dart:async';
 
 // Define expected year and semester for demonstration
 const String expectedYear = '4';
 const String expectedSemester = '2';
 
 class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+
   @override
   _LoginScreenState createState() => _LoginScreenState();
 }
@@ -18,146 +23,197 @@ class _LoginScreenState extends State<LoginScreen> {
   final _passwordController = TextEditingController();
   bool _obscurePassword = true;
   bool _isLoading = false;
+  bool _hasInternet = true;
   String _errorMessage = '';
+  
+  final _supabaseService = SupabaseService();
+  
+  late final ConnectivityService _connectivityService;
+  NetworkStatus _networkStatus = NetworkStatus.online;
+  StreamSubscription? _connectivitySubscription;
+  
+  @override
+  void initState() {
+    super.initState();
+    _connectivityService = ConnectivityService();
+    _setupConnectivity();
+    
+    // Force lowercase for email input
+    _emailController.addListener(() {
+      final text = _emailController.text;
+      final lowercase = text.toLowerCase();
+      if (text != lowercase) {
+        _emailController.value = TextEditingValue(
+          text: lowercase,
+          selection: TextSelection.collapsed(offset: lowercase.length),
+        );
+      }
+    });
+  }
+
+  Future<void> _setupConnectivity() async {
+    await _connectivityService.initialize();
+    _connectivitySubscription = _connectivityService.statusStream.listen((status) {
+      if (mounted) {
+        setState(() {
+          _networkStatus = status;
+          _hasInternet = status == NetworkStatus.online;
+        });
+        
+        // Show appropriate message when connectivity changes
+        if (status != NetworkStatus.online) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(_getConnectivityMessage()),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 3),
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Internet connection restored'),
+              backgroundColor: Colors.green,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      }
+    });
+  }
 
   bool _isSchoolEmail(String email) {
     // This is a simple check. In a real app, you'd validate against your school's domain
     return email.endsWith('.edu') || email.endsWith('.ac.ke');
   }
 
-  void _login() {
+  String _getConnectivityMessage() {
+    switch (_networkStatus) {
+      case NetworkStatus.offline:
+        return 'No internet connection. Please check your Wi-Fi or mobile data.';
+      case NetworkStatus.slow:
+        return 'Your internet connection is slow or unstable. Some features may not work properly.';
+      case NetworkStatus.noData:
+        return 'You\'re connected, but there\'s no data. Please check your data plan or network settings.';
+      default:
+        return 'Connection error. Please try again.';
+    }
+  }
+
+  void _login() async {
+    if (_networkStatus != NetworkStatus.online) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_getConnectivityMessage()),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 3),
+          action: SnackBarAction(
+            label: 'Retry',
+            textColor: Colors.white,
+            onPressed: () {
+              if (_networkStatus == NetworkStatus.online) {
+                _login();
+              }
+            },
+          ),
+        ),
+      );
+      return;
+    }
+
     if (_formKey.currentState!.validate()) {
       setState(() {
         _isLoading = true;
         _errorMessage = '';
       });
       
-      // Simulate credential check (in a real app, this would check against a database)
-      Future.delayed(Duration(seconds: 1), () async {
-        try {
-          // Get SharedPreferences instance
-          final prefs = await SharedPreferences.getInstance();
-          
-          // Clean up the email to ensure consistent lookup
-          final String email = _emailController.text.trim();
-          
-          // Check if the user is trying to log in to a different account
-          final currentUserEmail = prefs.getString('current_user_email') ?? prefs.getString('currentUser');
-          if (currentUserEmail != null && currentUserEmail != email) {
-            print('Detected login attempt to different account: $email (current: $currentUserEmail)');
-            
-            // Clear any stored dashboard state for the previous user
-            await prefs.remove('current_profile_loaded');
-            await prefs.remove('current_timetable_loaded');
-          }
-          
-          // Retrieve stored user data
-          final userDataString = prefs.getString(email);
-          
-          // Debugging: Print retrieved data
-          print('Retrieved user data for email $email: ${userDataString ?? 'No data found'}');
-          
-          if (userDataString == null) {
-            // Email not found
-            setState(() {
-              _errorMessage = 'No account found with this email';
-              _isLoading = false;
-            });
-            return;
-          }
-          
-          // Parse user data
-          final userData = json.decode(userDataString) as Map<String, dynamic>;
-          
-          // Handle potential null or missing password
-          final storedPassword = userData['password'];
-          final enteredPassword = _passwordController.text.trim();
-          
-          // Debug password comparison
-          print('Stored password: ${storedPassword ?? 'MISSING'}');
-          print('Entered password: $enteredPassword');
-          
-          // Check if password matches - handle null case
-          if (storedPassword == null) {
-            print('WARNING: Stored password is null - will need to reset password');
-            setState(() {
-              _errorMessage = 'Account recovery needed. Please use password reset.';
-              _isLoading = false;
-            });
-            return;
-          }
-          
-          if (storedPassword.toString().trim() != enteredPassword) {
-            setState(() {
-              _errorMessage = 'Incorrect password';
-              _isLoading = false;
-            });
-            return;
-          }
-
-          // Login successful
-          print('Login successful for user: ${userData['name']}');
+      try {
+        final String email = _emailController.text.trim();
+        final String password = _passwordController.text.trim();
+        
+        final result = await _supabaseService.studentDirectLogin(email, password);
+        
+        if (!mounted) return;
+        
+        if (!result['success']) {
           setState(() {
+            _errorMessage = result['message'];
             _isLoading = false;
           });
-
-          // Pre-store login status before verification
-          await prefs.setBool('isLoggedIn', true);
-          await prefs.setString('currentUser', email);
-          await prefs.setString('current_user_email', email);
-
-          // Ensure year and semester are handled as numeric values
-          String studentYear = userData['year']?.toString() ?? "";
-          String studentSemester = userData['semester']?.toString() ?? "";
-
-          studentYear = studentYear.replaceAll(RegExp(r'\D'), '');
-          studentSemester = studentSemester.replaceAll(RegExp(r'\D'), '');
-
-          // Use numeric values for comparison
-          bool yearMatch = studentYear == expectedYear;
-          bool semesterMatch = studentSemester == expectedSemester;
           
-          // Update any missing fields in the user data
-          final updatedUserData = {
-            'name': userData['name'] ?? '',
-            'email': email,
-            'password': storedPassword,
-            'department': userData['department'] ?? '',
-            'course': userData['course'] ?? '',
-            'year': userData['year'] ?? '',
-            'semester': userData['semester'] ?? '',
-            'lastLogin': DateTime.now().toIso8601String(),
-          };
-          
-          // Save updated user data
-          await prefs.setString(email, json.encode(updatedUserData));
-          
-          // Also update current user data
-          await prefs.setString('current_user_name', updatedUserData['name']);
-          await prefs.setString('current_user_department', updatedUserData['department']);
-          await prefs.setString('current_user_course', updatedUserData['course']);
-          await prefs.setString('current_user_year', updatedUserData['year']);
-          await prefs.setString('current_user_semester', updatedUserData['semester']);
+          // Show error in snackbar
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(result['message'] ?? 'Login failed. Please try again.'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 3),
+              action: SnackBarAction(
+                label: 'Retry',
+                textColor: Colors.white,
+                onPressed: () {
+                  _login();
+                },
+              ),
+            ),
+          );
+          return;
+        }
+        
+        final userData = result['userData'];
+        print('Login successful for user: ${userData['name']}');
+        setState(() {
+          _isLoading = false;
+        });
 
-          // Navigate to verification page with user data
-          Navigator.pushNamed(context, AppRoutes.emailVerification, arguments: {
+        // Ensure year and semester are handled as numeric values
+        String studentYear = userData['year']?.toString() ?? "";
+        String studentSemester = userData['semester']?.toString() ?? "";
+
+        studentYear = studentYear.replaceAll(RegExp(r'\D'), '');
+        studentSemester = studentSemester.replaceAll(RegExp(r'\D'), '');
+
+        // Use numeric values for comparison
+        bool yearMatch = studentYear == expectedYear;
+        bool semesterMatch = studentSemester == expectedSemester;
+
+        // Navigate to verification page with user data
+        Navigator.pushNamed(
+          context,
+          AppRoutes.emailVerification,
+          arguments: {
             'email': email,
             'name': userData['name'],
-            'password': storedPassword, // Include password to ensure it's preserved
+            'password': userData['password'],
             'department': userData['department'],
             'course': userData['course'],
             'year': userData['year'],
             'semester': userData['semester'],
             'isFromLogin': true,
-          });
-        } catch (e) {
-          print('Error during login: $e');
-          setState(() {
-            _errorMessage = 'An error occurred. Please try again.';
-            _isLoading = false;
-          });
-        }
-      });
+          },
+        );
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _errorMessage = 'Unable to connect to the server. Please check your internet connection and try again.';
+          _isLoading = false;
+        });
+        
+        // Show error in snackbar
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Network error. Please check your connection and try again.'),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 3),
+            action: SnackBarAction(
+              label: 'Retry',
+              textColor: Colors.white,
+              onPressed: () {
+                _login();
+              },
+            ),
+          ),
+        );
+      }
     }
   }
 
@@ -177,7 +233,19 @@ class _LoginScreenState extends State<LoginScreen> {
             child: Container(
               width: MediaQuery.of(context).size.width,
               padding: EdgeInsets.symmetric(horizontal: 16),
-              child: Card(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    'Student Login',
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.blue,
+                    ),
+                  ),
+                  SizedBox(height: 20),
+                  Card(
                 margin: EdgeInsets.zero,
                 elevation: 4,
                 shape: RoundedRectangleBorder(
@@ -190,43 +258,46 @@ class _LoginScreenState extends State<LoginScreen> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          'Welcome Back!',
-                          style: TextStyle(
-                            fontSize: 24,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.blue,
-                          ),
-                        ),
-                        SizedBox(height: 20),
-                        if (_errorMessage.isNotEmpty)
-                          Container(
-                            padding: EdgeInsets.all(10),
-                            margin: EdgeInsets.only(bottom: 15),
-                            decoration: BoxDecoration(
-                              color: Colors.red.shade50,
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: Colors.red.shade200),
-                            ),
-                            child: Row(
-                              children: [
-                                Icon(Icons.error_outline, color: Colors.red),
-                                SizedBox(width: 10),
-                                Expanded(
-                                  child: Text(
-                                    _errorMessage,
-                                    style: TextStyle(color: Colors.red),
+                            if (_networkStatus != NetworkStatus.online)
+                              Container(
+                                padding: EdgeInsets.all(12),
+                                margin: EdgeInsets.symmetric(vertical: 16),
+                                decoration: BoxDecoration(
+                                  color: Colors.red.shade50,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: Colors.red.shade200,
+                                    width: 1,
                                   ),
                                 ),
-                              ],
-                            ),
-                          ),
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.wifi_off, color: Colors.red),
+                                    SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        _getConnectivityMessage(),
+                                        style: TextStyle(
+                                          color: Colors.red[700],
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            
                         TextFormField(
                           controller: _emailController,
                           decoration: InputDecoration(
                             labelText: 'School Email',
-                            hintText: 'e.g., admission_no@student.tharaka.ac.ke',
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
                             prefixIcon: Icon(Icons.email),
+                                hintText: 'username@student.thara.ac.ke',
+                                filled: true,
+                                fillColor: Colors.grey[50],
                           ),
                           keyboardType: TextInputType.emailAddress,
                           validator: (value) {
@@ -234,16 +305,20 @@ class _LoginScreenState extends State<LoginScreen> {
                               return 'Please enter your email';
                             }
                             if (!_isSchoolEmail(value)) {
-                              return 'Please use a valid school email';
+                                  return 'Please use your @student.thara.ac.ke email';
                             }
                             return null;
                           },
                         ),
-                        SizedBox(height: 15),
+                            SizedBox(height: 16),
+                            
                         TextFormField(
                           controller: _passwordController,
                           decoration: InputDecoration(
                             labelText: 'Password',
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
                             prefixIcon: Icon(Icons.lock),
                             suffixIcon: IconButton(
                               icon: Icon(
@@ -255,6 +330,8 @@ class _LoginScreenState extends State<LoginScreen> {
                                 });
                               },
                             ),
+                                filled: true,
+                                fillColor: Colors.grey[50],
                           ),
                           obscureText: _obscurePassword,
                           validator: (value) {
@@ -268,6 +345,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           },
                         ),
                         SizedBox(height: 10),
+                            
                         Align(
                           alignment: Alignment.centerRight,
                           child: TextButton(
@@ -282,33 +360,69 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                           ),
                         ),
-                        SizedBox(height: 20),
+                            
+                            if (_errorMessage.isNotEmpty)
+                              Container(
+                                padding: EdgeInsets.all(12),
+                                margin: EdgeInsets.only(bottom: 16),
+                                decoration: BoxDecoration(
+                                  color: Colors.red.shade50,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: Colors.red.shade200,
+                                    width: 1,
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.error_outline, color: Colors.red),
+                                    SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        _errorMessage,
+                                        style: TextStyle(
+                                          color: Colors.red[700],
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            
                         SizedBox(
                           width: double.infinity,
+                              height: 50,
                           child: ElevatedButton(
                             onPressed: _isLoading ? null : _login,
                             style: ElevatedButton.styleFrom(
                               backgroundColor: Colors.blue,
                               foregroundColor: Colors.white,
-                              padding: EdgeInsets.symmetric(vertical: 15),
-                              textStyle: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(10),
                               ),
+                                  elevation: 2,
                             ),
                             child: _isLoading
                                 ? SizedBox(
-                                    height: 20,
-                                    width: 20,
+                                      width: 24,
+                                      height: 24,
                                     child: CircularProgressIndicator(
                                       color: Colors.white,
                                       strokeWidth: 2,
                                     ),
                                   )
-                                : Text('Login'),
+                                  : Text(
+                                      'Login',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
                           ),
                         ),
-                        SizedBox(height: 20),
+                            SizedBox(height: 16),
+                            
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
@@ -331,6 +445,8 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
                 ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -343,6 +459,7 @@ class _LoginScreenState extends State<LoginScreen> {
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
+    _connectivitySubscription?.cancel();
     super.dispose();
   }
 } 

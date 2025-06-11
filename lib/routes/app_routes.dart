@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:qr_attendance/screens/auth/login_screen.dart';
 import 'package:qr_attendance/screens/auth/lecturer_login_screen.dart';
-import 'package:qr_attendance/screens/auth/reset_password_screen.dart';
 import 'package:qr_attendance/screens/auth/lecturer_signup_screen.dart';
 import 'package:qr_attendance/screens/auth/lecturer_reset_password_screen.dart';
 import 'package:qr_attendance/screens/lecturer/lecturer_dashboard_screen.dart';
@@ -18,6 +17,8 @@ import 'package:qr_attendance/screens/student/view_page.dart';
 import 'package:qr_attendance/screens/auth/student_reset_password_screen.dart';
 import 'package:qr_attendance/screens/student/student_timetable_page.dart';
 import 'package:qr_attendance/screens/lecturer/update_lecturer_details_screen.dart';
+import 'package:qr_attendance/screens/lecturer/pin_location_page.dart';
+import 'package:qr_attendance/screens/lecturer/analysis_page.dart';
 
 // New imports for student dashboard pages
 import 'package:qr_attendance/screens/student/scan_qr_page.dart';
@@ -78,6 +79,8 @@ class AppRoutes {
   static const String lecturerSchedulesPage = '/lecturer-schedules';
   static const String lecturerNotificationsPage = '/lecturer-notifications';
   static const String catMarksEntryPage = '/cat-marks-entry';
+  static const String pinLocationPage = '/pin-location';
+  static const String analysisPage = '/analysis';
 
   static Map<String, WidgetBuilder> getRoutes() {
     return {
@@ -119,6 +122,8 @@ class AppRoutes {
       lecturerSchedulesPage: (context) => LecturerSchedulesPage(),
       lecturerNotificationsPage: (context) => LecturerNotificationsPage(),
       catMarksEntryPage: (context) => CatMarksEntryPage(),
+      pinLocationPage: (context) => PinLocationPage(),
+      analysisPage: (context) => AnalysisPage(),
     };
   }
 } 

@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:qr_attendance/routes/app_routes.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
+import 'package:qr_attendance/services/supabase_service.dart';
 
 class ResetPasswordScreen extends StatefulWidget {
+  const ResetPasswordScreen({super.key});
+
   @override
   _ResetPasswordScreenState createState() => _ResetPasswordScreenState();
 }
@@ -15,6 +16,10 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
   final _confirmPasswordController = TextEditingController();
   bool _obscurePassword = true;
   bool _obscureConfirmPassword = true;
+  bool _isLoading = false;
+  
+  // Create an instance of the SupabaseService
+  final _supabaseService = SupabaseService();
   
   bool _isSchoolEmail(String email) {
     // This is a simple check. In a real app, you'd validate against your school's domain
@@ -23,44 +28,55 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
 
   void _resetPassword() async {
     if (_formKey.currentState!.validate()) {
-      // Get SharedPreferences instance
-      final prefs = await SharedPreferences.getInstance();
+      setState(() {
+        _isLoading = true;
+      });
       
-      // Retrieve stored user data
-      final userDataString = prefs.getString(_emailController.text);
+      final email = _emailController.text.trim();
+      final password = _passwordController.text;
       
-      if (userDataString == null) {
-        // Email not found
+      try {
+        final result = await _supabaseService.resetStudentPassword(email, password);
+        
+        setState(() {
+          _isLoading = false;
+        });
+        
+        if (result['success']) {
+          // Show success message
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(result['message']),
+              backgroundColor: Colors.green,
+            ),
+          );
+          
+          // Navigate back to login after showing success message
+          Future.delayed(Duration(seconds: 2), () {
+            Navigator.pushReplacementNamed(context, AppRoutes.login);
+          });
+        } else {
+          // Show error message
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(result['message']),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      } catch (e) {
+        setState(() {
+          _isLoading = false;
+        });
+        
+        // Show error message
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('No account found with this email'),
+            content: Text('An error occurred. Please try again.'),
             backgroundColor: Colors.red,
           ),
         );
-        return;
       }
-      
-      // Parse user data
-      final userData = json.decode(userDataString) as Map<String, dynamic>;
-      
-      // Update password
-      userData['password'] = _passwordController.text;
-      
-      // Store updated user data
-      await prefs.setString(_emailController.text, json.encode(userData));
-      
-      // Show success message
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Password reset successful!'),
-          backgroundColor: Colors.green,
-        ),
-      );
-      
-      // Navigate back to login after showing success message
-      Future.delayed(Duration(seconds: 2), () {
-        Navigator.pushReplacementNamed(context, AppRoutes.login);
-      });
     }
   }
 
@@ -189,7 +205,7 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
                       SizedBox(
                         width: double.infinity,
                         child: ElevatedButton(
-                          onPressed: _resetPassword,
+                          onPressed: _isLoading ? null : _resetPassword,
                           style: ElevatedButton.styleFrom(
                             backgroundColor: Colors.blue,
                             foregroundColor: Colors.white,
@@ -199,7 +215,16 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
                               fontWeight: FontWeight.bold,
                             ),
                           ),
-                          child: Text('Reset Password'),
+                          child: _isLoading 
+                            ? const SizedBox(
+                                height: 20,
+                                width: 20,
+                                child: CircularProgressIndicator(
+                                  color: Colors.white,
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Text('Reset Password'),
                         ),
                       ),
                       SizedBox(height: 20),
